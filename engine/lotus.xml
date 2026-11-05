@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    LotusKey (ibus-LotusKey) - IBus Component Specification
+    High-performance Native Vietnamese Input Method Engine for GNOME Wayland
+-->
+<component>
+    <name>org.freedesktop.IBus.LotusKey</name>
+    <description>LotusKey Vietnamese Input Method Engine</description>
+    <version>2.0.0</version>
+    <author>Victor Pham</author>
+    <homepage>https://github.com/LotusInputMethod/fcitx5-lotus</homepage>
+    <license>MIT</license>
+    <exec>/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/ibus-engine-lotuskey --ibus</exec>
+    <textdomain>ibus-LotusKey</textdomain>
+    <observed-paths>
+        <path>/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/ibus-engine-lotuskey</path>
+    </observed-paths>
+    <engines>
+        <engine>
+            <name>lotuskey</name>
+            <longname>LotusKey - Telex</longname>
+            <description>Bộ gõ tiếng Việt LotusKey (Telex)</description>
+            <language>vi</language>
+            <license>MIT</license>
+            <author>Victor Pham</author>
+            <icon>/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg</icon>
+            <layout>us</layout>
+            <rank>99</rank>
+            <symbol>🇻🇳</symbol>
+            <setup>/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/lotuskey-setup</setup>
+        </engine>
+        <engine>
+            <name>lotuskey-vni</name>
+            <longname>LotusKey - VNI</longname>
+            <description>Bộ gõ tiếng Việt LotusKey (VNI)</description>
+            <language>vi</language>
+            <license>MIT</license>
+            <author>Victor Pham</author>
+            <icon>/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg</icon>
+            <layout>us</layout>
+            <rank>98</rank>
+            <symbol>🇻🇳</symbol>
+            <setup>/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/lotuskey-setup</setup>
+        </engine>
+        <engine>
+            <name>lotus</name>
+            <longname>LotusKey - Telex (Legacy)</longname>
+            <description>LotusKey Telex Compatibility Alias</description>
+            <language>vi</language>
+            <license>MIT</license>
+            <author>Victor Pham</author>
+            <icon>/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg</icon>
+            <layout>us</layout>
+            <rank>97</rank>
+            <symbol>🇻🇳</symbol>
+            <setup>/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/lotuskey-setup</setup>
+        </engine>
+        <engine>
+            <name>lotus-vni</name>
+            <longname>LotusKey - VNI (Legacy)</longname>
+            <description>LotusKey VNI Compatibility Alias</description>
+            <language>vi</language>
+            <license>MIT</license>
+            <author>Victor Pham</author>
+            <icon>/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg</icon>
+            <layout>us</layout>
+            <rank>96</rank>
+            <symbol>🇻🇳</symbol>
+            <setup>/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/lotuskey-setup</setup>
+        </engine>
+    </engines>
+</component>

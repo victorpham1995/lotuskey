@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+python3 /home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/ui/quick_menu.py "$@"

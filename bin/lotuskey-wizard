@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python3 /home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/ui/setup_wizard.py "$@"

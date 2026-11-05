@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/*.deb
+*.o
+*.so
+*.log
+.env
+nohup.out
