@@ -1,7 +1,7 @@
 # 🪷 LotusKey (ibus-LotusKey): Bộ Gõ Tiếng Việt Native Cho Ubuntu GNOME Wayland
 
 Bộ gõ tiếng Việt thế hệ mới, tối ưu hóa 100% cho **Ubuntu GNOME Wayland**, kết hợp giữa:
-1. **Lõi C-ABI đa nền tảng siêu tốc (VieLotus Core)** với cơ chế Atomic Trail Commit triệt tiêu hoàn toàn hiện tượng nuốt chữ/mất ký tự trên Electron/Chromium (VS Code, Antigravity IDE, Chrome).
+1. **Lõi C-ABI đa nền tảng siêu tốc (LotusKey Core)** với cơ chế Atomic Trail Commit triệt tiêu hoàn toàn hiện tượng nuốt chữ/mất ký tự trên Electron/Chromium (VS Code, Antigravity IDE, Chrome).
 2. **Kiến trúc Native C IBus Engine** (`ibus-engine-lotuskey`) trực tiếp xử lý sự kiện phím với độ trễ xấp xỉ 0ms, không phụ thuộc vào lớp bọc Python runtime hay quyền trợ năng.
 3. **Cửa sổ Quick Menu Floating & Bảng điều khiển kiểu Unikey** được thiết kế hiện đại, tùy biến linh hoạt, khởi động cùng hệ thống.
 
@@ -30,7 +30,7 @@ cd /home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey
 ```
 
 Tập lệnh sẽ tự động:
-- Biên dịch mã nguồn C [`src/main.c`](file:///home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/src/main.c) liên kết với [`libVieLotusCAPI.so`](file:///home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/lib/libVieLotusCAPI.so).
+- Biên dịch mã nguồn C [`src/main.c`](file:///home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/src/main.c) liên kết với [`libLotusKeyCAPI.so`](file:///home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/lib/libLotusKeyCAPI.so).
 - Cài đặt component descriptor [`engine/lotus.xml`](file:///home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/engine/lotus.xml) vào `~/.local/share/ibus/component/`.
 - Cập nhật bộ đệm IBus Registry cache và kích hoạt nguồn gõ trong GNOME Shell.
 - Thiết lập tự động khởi động cùng hệ thống (`~/.config/autostart/lotuskey.desktop`).
@@ -61,9 +61,9 @@ ibus-LotusKey/
 ├── src/
 │   └── main.c                   # Toàn bộ mã nguồn C IBus Engine
 ├── lib/
-│   └── libVieLotusCAPI.so       # Thư viện C-ABI xử lý gõ tiếng Việt siêu tốc
+│   └── libLotusKeyCAPI.so       # Thư viện C-ABI xử lý gõ tiếng Việt siêu tốc
 ├── include/
-│   └── vielotus.h               # Header C-ABI
+│   └── lotuskey.h               # Header C-ABI
 ├── config/
 │   └── config_manager.py        # Quản lý cấu hình JSON & file môi trường config.env
 ├── ui/

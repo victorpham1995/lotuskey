@@ -45,11 +45,15 @@ def set_autostart(enabled: bool):
     try:
         os.makedirs(AUTOSTART_DIR, exist_ok=True)
         if enabled:
-            content = """[Desktop Entry]
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            local_engine = os.path.join(base_dir, "bin", "ibus-engine-lotuskey")
+            sys_engine = "/usr/lib/lotuskey/ibus-engine-lotuskey"
+            engine_exec = local_engine if os.path.exists(local_engine) else sys_engine
+            content = f"""[Desktop Entry]
 Type=Application
 Name=LotusKey
 Comment=Bộ gõ tiếng Việt LotusKey (IBus Wayland)
-Exec=/usr/lib/lotuskey/ibus-engine-lotuskey --ibus
+Exec={engine_exec} --ibus
 Icon=/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg
 Terminal=false
 Hidden=false

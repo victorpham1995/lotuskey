@@ -172,15 +172,15 @@ def scan_system_environment():
         "detail": f"Đường dẫn: {gcc_path or 'Không tìm thấy'}"
     })
     
-    # 4. Native VieLotus Core Library
-    so_path = os.path.join(_ENGINE_LIB, "libVieLotusCAPI.so")
+    # 4. Native LotusKey Core Library
+    so_path = os.path.join(_ENGINE_LIB, "libLotusKeyCAPI.so")
     so_ok = os.path.exists(so_path)
     results.append({
-        "id": "vielotus",
+        "id": "lotuskey_core",
         "name": "Thư viện xử lý tiếng Việt (64-bit)",
         "value": "Đã tích hợp" if so_ok else "Thiếu tệp thư viện",
         "ok": so_ok,
-        "detail": f"Kích thước: {os.path.getsize(so_path):,} bytes" if so_ok else "Không tìm thấy libVieLotusCAPI.so"
+        "detail": f"Kích thước: {os.path.getsize(so_path):,} bytes" if so_ok else "Không tìm thấy libLotusKeyCAPI.so"
     })
     
     # 5. GTK3 & Python GObject
@@ -228,10 +228,14 @@ def run_installation_step(step_idx, emit_log):
             else:
                 # Dev mode: compile từ source
                 emit_log("Biên dịch Native C IBus Engine (ibus-engine-lotuskey)...")
-                ibus_inc = "/tmp/ibus_dev/usr/include/ibus-1.0"
+                ibus_inc = os.path.join(BASE_DIR, ".ibus_dev", "usr", "include", "ibus-1.0")
+                if not os.path.isdir(ibus_inc):
+                    ibus_inc = "/tmp/ibus_dev/usr/include/ibus-1.0"
                 if not os.path.isdir(ibus_inc):
                     ibus_inc = "/usr/include/ibus-1.0"
-                ibus_lib = "/tmp/ibus_dev/usr/lib/x86_64-linux-gnu"
+                ibus_lib = os.path.join(BASE_DIR, ".ibus_dev", "usr", "lib", "x86_64-linux-gnu")
+                if not os.path.isfile(os.path.join(ibus_lib, "libibus-1.0.so")):
+                    ibus_lib = "/tmp/ibus_dev/usr/lib/x86_64-linux-gnu"
                 if not os.path.isfile(os.path.join(ibus_lib, "libibus-1.0.so")):
                     ibus_lib = "/usr/lib/x86_64-linux-gnu"
 
@@ -239,6 +243,13 @@ def run_installation_step(step_idx, emit_log):
                 out_bin  = _ENGINE_BIN
                 lib_dir  = _ENGINE_LIB
                 inc_dir  = _ENGINE_INC
+
+                so0_link = os.path.join(lib_dir, "libLotusKeyCAPI.so.0")
+                if not os.path.exists(so0_link):
+                    try:
+                        os.symlink("libLotusKeyCAPI.so", so0_link)
+                    except Exception:
+                        pass
 
                 pkg_cflags = subprocess.check_output(["pkg-config", "--cflags", "gobject-2.0", "glib-2.0", "gio-2.0"], text=True).split()
                 pkg_libs   = subprocess.check_output(["pkg-config", "--libs",   "gobject-2.0", "glib-2.0", "gio-2.0"], text=True).split()
@@ -251,18 +262,23 @@ def run_installation_step(step_idx, emit_log):
                     src_file,
                     f"-L{ibus_lib}",
                     f"-L{lib_dir}",
+                    "-Wl,-rpath,$ORIGIN",
                     "-Wl,-rpath,$ORIGIN/../lib",
                     f"-Wl,-rpath,{lib_dir}",
+                    "-Wl,-rpath,/usr/lib/lotuskey",
                     "-libus-1.0",
                 ] + pkg_libs + [
-                    "-lVieLotusCAPI",
+                    "-lLotusKeyCAPI",
                     "-o", out_bin
                 ]
                 emit_log(f"Chạy lệnh: {' '.join(cmd)}")
                 res = subprocess.run(cmd, capture_output=True, text=True)
                 if res.returncode != 0:
-                    emit_log(f"Lỗi biên dịch: {res.stderr}")
-                    return False
+                    if os.path.isfile(out_bin) and os.access(out_bin, os.X_OK):
+                        emit_log(f"⚠ Bỏ qua biên dịch lại, dùng binary có sẵn: {out_bin}")
+                    else:
+                        emit_log(f"Lỗi biên dịch: {res.stderr}")
+                        return False
                 legacy_bin = os.path.join(BASE_DIR, "bin", "ibus-engine-lotus")
                 if os.path.exists(legacy_bin) or os.path.islink(legacy_bin):
                     os.remove(legacy_bin)
@@ -275,16 +291,20 @@ def run_installation_step(step_idx, emit_log):
             emit_log("Cài đặt IBus Component XML & Registry Cache...")
             comp_dir = os.path.expanduser("~/.local/share/ibus/component")
             os.makedirs(comp_dir, exist_ok=True)
+            dup_xml = os.path.join(comp_dir, "lotus.xml")
+            if os.path.exists(dup_xml):
+                try:
+                    os.remove(dup_xml)
+                except Exception:
+                    pass
             # Deb: XML đã ở /usr/share/ibus/component (system-wide), chỉ copy vào user dir để ibus user registry nhận
             xml_src = _COMP_XML_SRC
             if os.path.isfile(xml_src):
                 shutil.copy(xml_src, os.path.join(comp_dir, "lotuskey.xml"))
-                shutil.copy(xml_src, os.path.join(comp_dir, "lotus.xml"))
             elif not _INSTALLED:
                 # Dev fallback
                 xml_src2 = os.path.join(BASE_DIR, "engine", "lotus.xml")
                 shutil.copy(xml_src2, os.path.join(comp_dir, "lotuskey.xml"))
-                shutil.copy(xml_src2, os.path.join(comp_dir, "lotus.xml"))
 
             # Build IBus Registry Cache
             reg = IBus.Registry.new()
@@ -409,7 +429,7 @@ def run_silent_setup():
         print("• Menu nhanh Quick Menu: Phím ` (grave key)")
         print("=" * 64)
         print("\nKhởi chạy Bảng điều khiển cấu hình...")
-        subprocess.Popen(["/usr/bin/lotuskey-setup"])
+        subprocess.Popen([_SETUP_BIN])
         return 0
     else:
         print("\n❌ Cài đặt thất bại. Vui lòng kiểm tra lại log bên trên.")
@@ -727,7 +747,7 @@ class SetupWizard(Gtk.Window):
         if self.current_page == 3:
             # Finish clicked: open setup panel if checked
             if self.chk_open_config_finish.get_active():
-                subprocess.Popen(["/usr/bin/lotuskey-setup"])
+                subprocess.Popen([_SETUP_BIN])
             self.close()
             return
 

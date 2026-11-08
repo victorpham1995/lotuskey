@@ -11,12 +11,27 @@ echo "Thư mục dự án: $ROOT_DIR"
 echo "[1/6] Biên dịch Native C IBus Engine..."
 cd "$ROOT_DIR"
 mkdir -p bin lib include src
+ln -sf libLotusKeyCAPI.so "$ROOT_DIR/lib/libLotusKeyCAPI.so.0"
 
-IBUS_INC="/tmp/ibus_dev/usr/include/ibus-1.0"
+IBUS_INC="$ROOT_DIR/.ibus_dev/usr/include/ibus-1.0"
+if [ ! -d "$IBUS_INC" ]; then
+    IBUS_INC="/tmp/ibus_dev/usr/include/ibus-1.0"
+fi
 if [ ! -d "$IBUS_INC" ]; then
     IBUS_INC="/usr/include/ibus-1.0"
 fi
-IBUS_LIB_DIR="/tmp/ibus_dev/usr/lib/x86_64-linux-gnu"
+if [ ! -d "$IBUS_INC" ]; then
+    echo " -> Tự động tải gói header libibus-1.0-dev cục bộ..."
+    mkdir -p "$ROOT_DIR/.ibus_dev"
+    (cd "$ROOT_DIR/.ibus_dev" && apt-get download libibus-1.0-dev && dpkg-deb -x libibus-1.0-dev*.deb .) || true
+    ln -sf /usr/lib/x86_64-linux-gnu/libibus-1.0.so.5 "$ROOT_DIR/.ibus_dev/usr/lib/x86_64-linux-gnu/libibus-1.0.so" 2>/dev/null || true
+    IBUS_INC="$ROOT_DIR/.ibus_dev/usr/include/ibus-1.0"
+fi
+
+IBUS_LIB_DIR="$ROOT_DIR/.ibus_dev/usr/lib/x86_64-linux-gnu"
+if [ ! -f "$IBUS_LIB_DIR/libibus-1.0.so" ]; then
+    IBUS_LIB_DIR="/tmp/ibus_dev/usr/lib/x86_64-linux-gnu"
+fi
 if [ ! -f "$IBUS_LIB_DIR/libibus-1.0.so" ]; then
     IBUS_LIB_DIR="/usr/lib/x86_64-linux-gnu"
 fi
@@ -28,11 +43,13 @@ gcc -O2 \
   "$ROOT_DIR/src/main.c" \
   -L"$IBUS_LIB_DIR" \
   -L"$ROOT_DIR/lib" \
+  -Wl,-rpath,'$ORIGIN' \
   -Wl,-rpath,'$ORIGIN/../lib' \
   -Wl,-rpath,"$ROOT_DIR/lib" \
+  -Wl,-rpath,/usr/lib/lotuskey \
   -libus-1.0 \
   $(pkg-config --libs gobject-2.0 glib-2.0 gio-2.0) \
-  -lVieLotusCAPI \
+  -lLotusKeyCAPI \
   -o "$ROOT_DIR/bin/ibus-engine-lotuskey"
 
 # Symlink legacy engine name for backwards compatibility
@@ -55,8 +72,8 @@ ln -sf "$ROOT_DIR/bin/lotuskey-setup" ~/.local/bin/lotuskey
 # 3. Copy component XML to user directory
 echo "[3/6] Cập nhật IBus Component XML (ibus-LotusKey)..."
 mkdir -p ~/.local/share/ibus/component
+rm -f ~/.local/share/ibus/component/lotus.xml
 cp "$ROOT_DIR/engine/lotus.xml" ~/.local/share/ibus/component/lotuskey.xml
-cp "$ROOT_DIR/engine/lotus.xml" ~/.local/share/ibus/component/lotus.xml
 
 # 4. Desktop Application Entry
 echo "[4/6] Cập nhật Application Shortcut..."

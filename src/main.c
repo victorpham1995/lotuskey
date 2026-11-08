@@ -2,19 +2,22 @@
  * LotusKey (ibus-LotusKey) - Native IBus Engine
  * Author: Victor Pham
  * High-performance Vietnamese Input Method Engine for GNOME Wayland
- * Powered by pure C-ABI Bridge (VieLotus Core)
+ * Powered by pure C-ABI Bridge (LotusKey Core)
  */
 
 #include <ibus.h>
+#include <gio/gio.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <stdarg.h>
 #include <signal.h>
-#include "vielotus.h"
+#include "lotuskey.h"
 
 static void log_debug(const char *fmt, ...) {
     FILE *fp = fopen("/tmp/ibus_lotus.log", "a");
@@ -44,7 +47,7 @@ typedef struct _IBusLotusEngineClass IBusLotusEngineClass;
 
 struct _IBusLotusEngine {
     IBusEngine parent;
-    vielotus_session_t session;
+    lotuskey_session_t session;
     gboolean enabled;
     gboolean is_vni;
     gboolean smart_bilingual;
@@ -143,7 +146,7 @@ static void ibus_lotus_engine_reset_internal(IBusLotusEngine *vl_engine) {
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
     if (vl_engine->session) {
-        vielotus_reset_session(vl_engine->session);
+        lotuskey_reset_session(vl_engine->session);
     }
     ibus_lotus_clear_preedit((IBusEngine *)vl_engine);
 }
@@ -153,14 +156,14 @@ static void ibus_lotus_commit_composing(IBusLotusEngine *vl_engine, const char *
     char buf[1024];
     buf[0] = '\0';
 
-    if (vl_engine->session && vielotus_is_composing(vl_engine->session)) {
+    if (vl_engine->session && lotuskey_is_composing(vl_engine->session)) {
         if (trailing_ascii && trailing_ascii[0] != '\0' && trailing_ascii[1] == '\0') {
             uint32_t cp = (uint32_t)(unsigned char)trailing_ascii[0];
-            vielotus_feed_char(vl_engine->session, cp);
+            lotuskey_feed_char(vl_engine->session, cp);
         } else {
-            vielotus_commit_word(vl_engine->session);
+            lotuskey_commit_word(vl_engine->session);
         }
-        const char *committed = vielotus_get_last_text(vl_engine->session);
+        const char *committed = lotuskey_get_last_text(vl_engine->session);
         if (committed && committed[0] != '\0') {
             snprintf(buf, sizeof(buf), "%s", committed);
         }
@@ -183,8 +186,8 @@ static void ibus_lotus_commit_composing(IBusLotusEngine *vl_engine, const char *
 
 static void ibus_lotus_update_preedit(IBusLotusEngine *vl_engine) {
     IBusEngine *engine = (IBusEngine *)vl_engine;
-    if (vl_engine->session && vielotus_is_composing(vl_engine->session)) {
-        const char *composing = vielotus_get_composing_text(vl_engine->session);
+    if (vl_engine->session && lotuskey_is_composing(vl_engine->session)) {
+        const char *composing = lotuskey_get_composing_text(vl_engine->session);
         if (composing && composing[0] != '\0') {
             IBusText *text = ibus_text_new_from_string(composing);
             guint char_len = ibus_text_get_length(text);
@@ -285,17 +288,17 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
         vl_engine->is_vni = config_is_vni;
     }
 
-    vielotus_set_input_method(
+    lotuskey_set_input_method(
         vl_engine->session,
-        vl_engine->is_vni ? VIELOTUS_INPUT_VNI : VIELOTUS_INPUT_TELEX
+        vl_engine->is_vni ? LOTUSKEY_INPUT_VNI : LOTUSKEY_INPUT_TELEX
     );
-    vielotus_set_grammar_profile(
+    lotuskey_set_grammar_profile(
         vl_engine->session,
-        vl_engine->sen_flex ? VIELOTUS_GRAMMAR_SEN_FLEX : VIELOTUS_GRAMMAR_CLASSIC
+        vl_engine->sen_flex ? LOTUSKEY_GRAMMAR_SEN_FLEX : LOTUSKEY_GRAMMAR_CLASSIC
     );
-    vielotus_set_smart_bilingual(vl_engine->session, vl_engine->smart_bilingual);
-    vielotus_set_modern_orthography(vl_engine->session, vl_engine->modern_orthography);
-    vielotus_set_quick_telex(vl_engine->session, vl_engine->quick_telex);
+    lotuskey_set_smart_bilingual(vl_engine->session, vl_engine->smart_bilingual);
+    lotuskey_set_modern_orthography(vl_engine->session, vl_engine->modern_orthography);
+    lotuskey_set_quick_telex(vl_engine->session, vl_engine->quick_telex);
 }
 
 static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
@@ -414,7 +417,7 @@ static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
 static void ibus_lotus_toggle_vietnamese(IBusLotusEngine *vl_engine) {
     vl_engine->enabled = !vl_engine->enabled;
     log_debug(">>> TOGGLED: enabled=%d\n", vl_engine->enabled);
-    if (!vl_engine->enabled && vielotus_is_composing(vl_engine->session)) {
+    if (!vl_engine->enabled && lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     }
     ibus_lotus_save_user_config(vl_engine);
@@ -578,14 +581,14 @@ static uint8_t ibus_lotus_active_tone_of_utf8(const char *utf8_str) {
 }
 
 static void ibus_lotus_replay_raw_keys(IBusLotusEngine *vl_engine, const char *raw_keys) {
-    vielotus_reset_session(vl_engine->session);
+    lotuskey_reset_session(vl_engine->session);
     for (size_t i = 0; raw_keys[i] != '\0'; i++) {
-        vielotus_feed_char(vl_engine->session, (uint32_t)(unsigned char)raw_keys[i]);
+        lotuskey_feed_char(vl_engine->session, (uint32_t)(unsigned char)raw_keys[i]);
     }
 }
 
 static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
-    const char *composing = vielotus_get_composing_text(vl_engine->session);
+    const char *composing = lotuskey_get_composing_text(vl_engine->session);
     if (!composing || composing[0] == '\0') {
         ibus_lotus_engine_reset_internal(vl_engine);
         return;
@@ -607,12 +610,12 @@ static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
     }
     prefix[cut] = '\0';
 
-    vielotus_feed_backspace(vl_engine->session);
-    if (!vielotus_is_composing(vl_engine->session)) {
+    lotuskey_feed_backspace(vl_engine->session);
+    if (!lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_engine_reset_internal(vl_engine);
         return;
     }
-    const char *after = vielotus_get_composing_text(vl_engine->session);
+    const char *after = lotuskey_get_composing_text(vl_engine->session);
     if (after && after[0] != '\0' && ibus_lotus_utf8_codepoint_count(after) < before_cp) {
         vl_engine->replayed_after_backspace = FALSE;
         ibus_lotus_update_preedit(vl_engine);
@@ -625,12 +628,12 @@ static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
     }
     char raw_keys[1024];
     ibus_lotus_raw_keys_for_utf8(prefix, vl_engine->is_vni, raw_keys, sizeof(raw_keys));
-    vielotus_reset_session(vl_engine->session);
+    lotuskey_reset_session(vl_engine->session);
     for (size_t i = 0; raw_keys[i] != '\0'; i++) {
-        vielotus_feed_char(vl_engine->session, (uint32_t)(unsigned char)raw_keys[i]);
+        lotuskey_feed_char(vl_engine->session, (uint32_t)(unsigned char)raw_keys[i]);
     }
     vl_engine->replayed_after_backspace = TRUE;
-    if (!vielotus_is_composing(vl_engine->session)) {
+    if (!lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_engine_reset_internal(vl_engine);
     } else {
         ibus_lotus_update_preedit(vl_engine);
@@ -638,7 +641,7 @@ static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
 }
 
 static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
-    vl_engine->session = vielotus_create_session();
+    vl_engine->session = lotuskey_create_session();
     vl_engine->enabled = TRUE;
     vl_engine->is_vni = FALSE;
     vl_engine->smart_bilingual = TRUE;
@@ -664,7 +667,7 @@ static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
 
     active_engines = g_list_append(active_engines, vl_engine);
 
-    vielotus_set_input_method(vl_engine->session, VIELOTUS_INPUT_TELEX);
+    lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_TELEX);
     ibus_lotus_load_user_config(vl_engine);
     ibus_lotus_build_prop_list(vl_engine);
 }
@@ -681,7 +684,7 @@ static void ibus_lotus_engine_finalize(GObject *object) {
         vl_engine->prop_list = NULL;
     }
     if (vl_engine->session) {
-        vielotus_destroy_session(vl_engine->session);
+        lotuskey_destroy_session(vl_engine->session);
         vl_engine->session = NULL;
     }
     G_OBJECT_CLASS(ibus_lotus_engine_parent_class)->finalize(object);
@@ -691,7 +694,7 @@ static void ibus_lotus_engine_reset(IBusEngine *engine) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
     ibus_lotus_engine_reset_internal(vl_engine);
     if (vl_engine->session) {
-        vielotus_append_context(vl_engine->session, "");
+        lotuskey_append_context(vl_engine->session, "");
     }
     IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->reset(engine);
 }
@@ -701,16 +704,16 @@ static void ibus_lotus_engine_enable(IBusEngine *engine) {
     const gchar *engine_name = ibus_engine_get_name(engine);
     if (engine_name && strstr(engine_name, "vni") != NULL) {
         vl_engine->is_vni = TRUE;
-        vielotus_set_input_method(vl_engine->session, VIELOTUS_INPUT_VNI);
+        lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_VNI);
     } else {
         vl_engine->is_vni = FALSE;
-        vielotus_set_input_method(vl_engine->session, VIELOTUS_INPUT_TELEX);
+        lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_TELEX);
     }
     ibus_lotus_load_user_config(vl_engine);
     ibus_lotus_build_prop_list(vl_engine);
     ibus_lotus_engine_reset_internal(vl_engine);
     if (vl_engine->session) {
-        vielotus_append_context(vl_engine->session, "");
+        lotuskey_append_context(vl_engine->session, "");
     }
     IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->enable(engine);
 }
@@ -718,13 +721,13 @@ static void ibus_lotus_engine_enable(IBusEngine *engine) {
 static void ibus_lotus_engine_disable(IBusEngine *engine) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
     vl_engine->is_password_field = FALSE;
-    if (vielotus_is_composing(vl_engine->session)) {
+    if (lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     } else {
         ibus_lotus_engine_reset_internal(vl_engine);
     }
     if (vl_engine->session) {
-        vielotus_append_context(vl_engine->session, "");
+        lotuskey_append_context(vl_engine->session, "");
     }
     IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->disable(engine);
 }
@@ -750,13 +753,13 @@ static void ibus_lotus_engine_focus_out(IBusEngine *engine) {
     vl_engine->ctrl_pressed = FALSE;
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
-    if (vielotus_is_composing(vl_engine->session)) {
+    if (lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     } else {
         ibus_lotus_engine_reset_internal(vl_engine);
     }
     if (vl_engine->session) {
-        vielotus_append_context(vl_engine->session, "");
+        lotuskey_append_context(vl_engine->session, "");
     }
     IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->focus_out(engine);
 }
@@ -764,7 +767,7 @@ static void ibus_lotus_engine_focus_out(IBusEngine *engine) {
 static void ibus_lotus_engine_set_content_type(IBusEngine *engine, guint purpose, guint hints) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
     vl_engine->is_password_field = (purpose == IBUS_INPUT_PURPOSE_PASSWORD) || (purpose == IBUS_INPUT_PURPOSE_PIN);
-    if (vl_engine->is_password_field && vielotus_is_composing(vl_engine->session)) {
+    if (vl_engine->is_password_field && lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_engine_reset_internal(vl_engine);
     }
     if (IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->set_content_type) {
@@ -772,23 +775,61 @@ static void ibus_lotus_engine_set_content_type(IBusEngine *engine, guint purpose
     }
 }
 
+static void ibus_lotus_spawn_tool(const char *tool_name) {
+    char self_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (len > 0) {
+        self_path[len] = '\0';
+        gchar *bin_dir = g_path_get_dirname(self_path);
+        gchar *sibling = g_build_filename(bin_dir, tool_name, NULL);
+        g_free(bin_dir);
+        if (g_file_test(sibling, G_FILE_TEST_IS_EXECUTABLE)) {
+            g_spawn_command_line_async(sibling, NULL);
+            g_free(sibling);
+            return;
+        }
+        g_free(sibling);
+    }
+
+    const gchar *home = g_get_home_dir();
+    if (home) {
+        gchar *local_bin = g_build_filename(home, ".local", "bin", tool_name, NULL);
+        if (g_file_test(local_bin, G_FILE_TEST_IS_EXECUTABLE)) {
+            g_spawn_command_line_async(local_bin, NULL);
+            g_free(local_bin);
+            return;
+        }
+        g_free(local_bin);
+    }
+
+    gchar *usr_bin = g_build_filename("/usr/bin", tool_name, NULL);
+    if (g_file_test(usr_bin, G_FILE_TEST_IS_EXECUTABLE)) {
+        g_spawn_command_line_async(usr_bin, NULL);
+        g_free(usr_bin);
+        return;
+    }
+    g_free(usr_bin);
+
+    g_spawn_command_line_async(tool_name, NULL);
+}
+
 static void ibus_lotus_engine_property_activate(IBusEngine *engine, const gchar *prop_name, guint prop_state) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
     if (g_strcmp0(prop_name, "lotus-setup") == 0) {
-        g_spawn_command_line_async("/usr/bin/lotuskey-setup", NULL);
+        ibus_lotus_spawn_tool("lotuskey-setup");
         return;
     } else if (g_strcmp0(prop_name, "lotus-quick-menu") == 0) {
-        g_spawn_command_line_async("/usr/bin/lotuskey-menu", NULL);
+        ibus_lotus_spawn_tool("lotuskey-menu");
         return;
     } else if (g_strcmp0(prop_name, "lotus-status") == 0) {
         ibus_lotus_toggle_vietnamese(vl_engine);
         return;
     } else if (g_strcmp0(prop_name, "smart-bilingual") == 0) {
         vl_engine->smart_bilingual = (prop_state == PROP_STATE_CHECKED);
-        vielotus_set_smart_bilingual(vl_engine->session, vl_engine->smart_bilingual);
+        lotuskey_set_smart_bilingual(vl_engine->session, vl_engine->smart_bilingual);
     } else if (g_strcmp0(prop_name, "modern-orthography") == 0) {
         vl_engine->modern_orthography = (prop_state == PROP_STATE_CHECKED);
-        vielotus_set_modern_orthography(vl_engine->session, vl_engine->modern_orthography);
+        lotuskey_set_modern_orthography(vl_engine->session, vl_engine->modern_orthography);
     }
     ibus_lotus_save_user_config(vl_engine);
     ibus_lotus_build_prop_list(vl_engine);
@@ -847,7 +888,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
 
     // Password / PIN protection
     if (vl_engine->is_password_field) {
-        if (vielotus_is_composing(vl_engine->session)) {
+        if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_engine_reset_internal(vl_engine);
         }
         return FALSE;
@@ -877,7 +918,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
 
     // Pass through system hotkeys (Ctrl, Alt, Super/Win)
     if (state & (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_SUPER_MASK)) {
-        if (vielotus_is_composing(vl_engine->session)) {
+        if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_commit_composing(vl_engine, NULL);
         }
         return FALSE;
@@ -891,27 +932,27 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         keyval == '\r' || keyval == '\n' || keyval == '\t' || keyval == 0x1b ||
         (keyval >= IBUS_KEY_Home && keyval <= IBUS_KEY_Insert) ||
         (keyval >= IBUS_KEY_KP_Home && keyval <= IBUS_KEY_KP_Delete)) {
-        if (vielotus_is_composing(vl_engine->session)) {
+        if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_commit_composing(vl_engine, NULL);
         }
         if (vl_engine->session) {
-            vielotus_append_context(vl_engine->session, "");
+            lotuskey_append_context(vl_engine->session, "");
         }
         return FALSE;
     }
 
     // Handle BackSpace
     if (keyval == IBUS_KEY_BackSpace) {
-        if (vielotus_is_composing(vl_engine->session)) {
+        if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_backspace_composing(vl_engine);
             return TRUE;
         }
-        vielotus_reset_session(vl_engine->session);
+        lotuskey_reset_session(vl_engine->session);
         return FALSE;
     }
 
     // Handle Grave Key ` to open Quick Menu (if enabled and not composing)
-    if (keyval == '`' && vl_engine->grave_menu_enabled && !vielotus_is_composing(vl_engine->session)) {
+    if (keyval == '`' && vl_engine->grave_menu_enabled && !lotuskey_is_composing(vl_engine->session)) {
         gint64 now = get_current_time_ms();
         if (now - vl_engine->last_grave_time_ms < 400) {
             // Second press in rapid succession: pass literal ` to app
@@ -919,7 +960,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             return FALSE;
         }
         vl_engine->last_grave_time_ms = now;
-        g_spawn_command_line_async("/usr/bin/lotuskey-menu", NULL);
+        ibus_lotus_spawn_tool("lotuskey-menu");
         return TRUE;
     }
 
@@ -931,7 +972,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
     // Handle Bracket transforms '[' -> 'ơ', ']' -> 'ư', '{' -> 'Ơ', '}' -> 'Ư'
     if (vl_engine->bracket_transform && !vl_engine->is_vni) {
         if (keyval == '[') {
-            if (vielotus_is_composing(vl_engine->session)) {
+            if (lotuskey_is_composing(vl_engine->session)) {
                 ibus_lotus_commit_composing(vl_engine, NULL);
             }
             IBusText *commit_text = ibus_text_new_from_static_string("ơ");
@@ -939,7 +980,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             ibus_lotus_engine_reset_internal(vl_engine);
             return TRUE;
         } else if (keyval == ']') {
-            if (vielotus_is_composing(vl_engine->session)) {
+            if (lotuskey_is_composing(vl_engine->session)) {
                 ibus_lotus_commit_composing(vl_engine, NULL);
             }
             IBusText *commit_text = ibus_text_new_from_static_string("ư");
@@ -947,7 +988,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             ibus_lotus_engine_reset_internal(vl_engine);
             return TRUE;
         } else if (keyval == '{') {
-            if (vielotus_is_composing(vl_engine->session)) {
+            if (lotuskey_is_composing(vl_engine->session)) {
                 ibus_lotus_commit_composing(vl_engine, NULL);
             }
             IBusText *commit_text = ibus_text_new_from_static_string("Ơ");
@@ -955,7 +996,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             ibus_lotus_engine_reset_internal(vl_engine);
             return TRUE;
         } else if (keyval == '}') {
-            if (vielotus_is_composing(vl_engine->session)) {
+            if (lotuskey_is_composing(vl_engine->session)) {
                 ibus_lotus_commit_composing(vl_engine, NULL);
             }
             IBusText *commit_text = ibus_text_new_from_static_string("Ư");
@@ -966,7 +1007,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
     }
 
     // Handle W2U option: If w2u is disabled, typing 'w' or 'W' at start of word should NOT turn into 'ư'/'Ư'
-    if (!vl_engine->w2u && !vl_engine->is_vni && (keyval == 'w' || keyval == 'W') && !vielotus_is_composing(vl_engine->session)) {
+    if (!vl_engine->w2u && !vl_engine->is_vni && (keyval == 'w' || keyval == 'W') && !lotuskey_is_composing(vl_engine->session)) {
         char buf[2] = { (char)keyval, '\0' };
         IBusText *commit_text = ibus_text_new_from_string(buf);
         ibus_engine_commit_text(engine, commit_text);
@@ -977,13 +1018,13 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
     if (keyval >= 32 && keyval < 127) {
         gboolean is_alpha = (keyval >= 'a' && keyval <= 'z') || (keyval >= 'A' && keyval <= 'Z');
         gboolean is_digit = (keyval >= '0' && keyval <= '9');
-        gboolean is_word_char = is_alpha || (vl_engine->is_vni && is_digit && vielotus_is_composing(vl_engine->session));
+        gboolean is_word_char = is_alpha || (vl_engine->is_vni && is_digit && lotuskey_is_composing(vl_engine->session));
 
         if (!is_word_char) {
-            if (vielotus_is_composing(vl_engine->session)) {
+            if (lotuskey_is_composing(vl_engine->session)) {
                 if (keyval == '(' || keyval == '[' || keyval == '{') {
-                    vielotus_feed_char(vl_engine->session, keyval);
-                    const char *committed = vielotus_get_last_text(vl_engine->session);
+                    lotuskey_feed_char(vl_engine->session, keyval);
+                    const char *committed = lotuskey_get_last_text(vl_engine->session);
                     char buf[1024];
                     snprintf(buf, sizeof(buf), "%s%c", committed ? committed : "", (char)keyval);
                     IBusText *commit_text = ibus_text_new_from_string(buf);
@@ -995,26 +1036,26 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
                 ibus_lotus_commit_composing(vl_engine, trail);
                 return TRUE;
             } else {
-                vielotus_feed_char(vl_engine->session, keyval);
+                lotuskey_feed_char(vl_engine->session, keyval);
                 return FALSE;
             }
         }
 
         /* Auto-flush preedit before buffer overflow */
-        if (vielotus_is_composing(vl_engine->session)) {
-            const char *raw_check = vielotus_get_raw_text(vl_engine->session);
-            const char *comp_check = vielotus_get_composing_text(vl_engine->session);
+        if (lotuskey_is_composing(vl_engine->session)) {
+            const char *raw_check = lotuskey_get_raw_text(vl_engine->session);
+            const char *comp_check = lotuskey_get_composing_text(vl_engine->session);
             if ((raw_check && strlen(raw_check) >= 48) || (comp_check && strlen(comp_check) >= 48)) {
                 ibus_lotus_commit_composing(vl_engine, NULL);
             }
         }
 
         // Telex stop-coda and tone corrections
-        if (!vl_engine->is_vni && vielotus_is_composing(vl_engine->session)) {
+        if (!vl_engine->is_vni && lotuskey_is_composing(vl_engine->session)) {
             char lower_key = vl_tolower((char)keyval);
             uint8_t key_tone = ibus_lotus_telex_tone_for_key(lower_key);
-            const char *raw_before = vielotus_get_raw_text(vl_engine->session);
-            const char *comp_before = vielotus_get_composing_text(vl_engine->session);
+            const char *raw_before = lotuskey_get_raw_text(vl_engine->session);
+            const char *comp_before = lotuskey_get_composing_text(vl_engine->session);
             if (key_tone > 0 && raw_before && comp_before && ibus_lotus_has_non_ascii(comp_before)) {
                 size_t rlen = strlen(raw_before);
                 size_t clen = strlen(comp_before);
@@ -1047,13 +1088,13 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             }
         }
 
-        int32_t action = vielotus_feed_char(vl_engine->session, keyval);
+        int32_t action = lotuskey_feed_char(vl_engine->session, keyval);
 
-        if (!vl_engine->is_vni && vielotus_is_composing(vl_engine->session)) {
+        if (!vl_engine->is_vni && lotuskey_is_composing(vl_engine->session)) {
             char lower_key = vl_tolower((char)keyval);
             if (lower_key == 'a' || lower_key == 'e' || lower_key == 'o') {
-                const char *raw_after = vielotus_get_raw_text(vl_engine->session);
-                const char *comp_after = vielotus_get_composing_text(vl_engine->session);
+                const char *raw_after = lotuskey_get_raw_text(vl_engine->session);
+                const char *comp_after = lotuskey_get_composing_text(vl_engine->session);
                 if (raw_after && comp_after) {
                     size_t rlen = strlen(raw_after);
                     size_t clen = strlen(comp_after);
@@ -1081,8 +1122,8 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             }
         }
 
-        if (action == VIELOTUS_ACTION_COMMIT) {
-            const char *committed = vielotus_get_last_text(vl_engine->session);
+        if (action == LOTUSKEY_ACTION_COMMIT) {
+            const char *committed = lotuskey_get_last_text(vl_engine->session);
             char buf[1024];
             snprintf(buf, sizeof(buf), "%s", committed ? committed : "");
             if (buf[0] != '\0') {
@@ -1091,16 +1132,16 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             }
             ibus_lotus_engine_reset_internal(vl_engine);
             return TRUE;
-        } else if (vielotus_is_composing(vl_engine->session) ||
-                   action == VIELOTUS_ACTION_REPLACE ||
-                   action == VIELOTUS_ACTION_CONSUMED) {
+        } else if (lotuskey_is_composing(vl_engine->session) ||
+                   action == LOTUSKEY_ACTION_REPLACE ||
+                   action == LOTUSKEY_ACTION_CONSUMED) {
             ibus_lotus_update_preedit(vl_engine);
             return TRUE;
         }
         return FALSE;
     }
 
-    if (vielotus_is_composing(vl_engine->session)) {
+    if (lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     }
     return FALSE;
@@ -1160,10 +1201,16 @@ int main(int argc, char **argv) {
     if (ibus) {
         ibus_bus_request_name(bus, "org.freedesktop.IBus.LotusKey", 0);
     } else {
-        IBusComponent *component = ibus_component_new_from_file("/usr/share/ibus/component/lotuskey.xml");
+        const gchar *home = g_get_home_dir();
+        gchar *user_xml = home ? g_build_filename(home, ".local", "share", "ibus", "component", "lotuskey.xml", NULL) : NULL;
+        const gchar *xml_path = (user_xml && g_file_test(user_xml, G_FILE_TEST_EXISTS))
+            ? user_xml
+            : "/usr/share/ibus/component/lotuskey.xml";
+        IBusComponent *component = ibus_component_new_from_file(xml_path);
         if (component) {
             ibus_bus_register_component(bus, component);
         }
+        if (user_xml) g_free(user_xml);
     }
 
     ibus_main();
