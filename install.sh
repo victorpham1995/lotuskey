@@ -204,10 +204,6 @@ from config.im_framework import sync_ibus_wayland_socket
 sync_ibus_wayland_socket()
 " 2>/dev/null || true
 
-if command -v gsettings >/dev/null 2>&1; then
-    gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
-    gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
-fi
 if command -v ibus >/dev/null 2>&1; then
     for _ in 1 2 3 4 5; do
         python3 -c "
@@ -221,6 +217,12 @@ sync_ibus_wayland_socket()
         fi
         sleep 0.6
     done
+fi
+if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]" 2>/dev/null || true
+    sleep 0.2
+    gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
+    gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
 fi
 
 echo "=== Installation complete ==="

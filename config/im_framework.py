@@ -500,6 +500,10 @@ def apply_framework_config(cfg: Dict[str, Any], macros: List[Dict[str, str]] = N
         if "gnome" in env["desktop"].lower() or "ubuntu" in env["desktop"].lower():
             if shutil.which("gsettings"):
                 subprocess.run(
+                    ["gsettings", "set", "org.gnome.desktop.input-sources", "sources", "[('xkb', 'us')]"],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                subprocess.run(
                     ["gsettings", "set", "org.gnome.desktop.input-sources", "sources", f"[('ibus', '{target_engine}'), ('xkb', 'us')]"],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
