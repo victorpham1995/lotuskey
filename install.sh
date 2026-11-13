@@ -1,111 +1,173 @@
 #!/usr/bin/env bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR"
 
-echo "=== Cài đặt Bộ gõ LotusKey (IBus Native Wayland) ==="
+# Optional flag: ./install.sh --setup-udev (configures /dev/uinput permissions for rootless UInput daemon)
+if [ "${1:-}" = "--setup-udev" ]; then
+    echo "=== Thiết lập quyền truy cập /dev/uinput cho LotusKey Universal Daemon ==="
+    sudo tee /etc/udev/rules.d/99-lotuskey-uinput.rules >/dev/null << 'EOF'
+KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
+EOF
+    sudo usermod -aG input "$USER" || true
+    sudo udevadm control --reload-rules || true
+    sudo udevadm trigger || true
+    echo "✓ Đã cấu hình /etc/udev/rules.d/99-lotuskey-uinput.rules và thêm user '$USER' vào nhóm 'input'."
+    echo "  (Lưu ý: Đăng xuất và đăng nhập lại nếu lần đầu thêm vào nhóm 'input')"
+    exit 0
+fi
+
+echo "=== Cài đặt Bộ gõ LotusKey (Universal Linux Distro & Multi-Framework) ==="
 echo "Thư mục dự án: $ROOT_DIR"
 
-# 1. Compile C-ABI Native Engine
-echo "[1/6] Biên dịch Native C IBus Engine..."
 cd "$ROOT_DIR"
 mkdir -p bin lib include src
+
+# 1. Detect Distro, Install Icons & Verify C-ABI Core Library (Auto-build fallback on ARM64 / musl / older GLIBC)
+echo "[1/6] Kiểm tra môi trường Linux Distro, Icon SVG & Thư viện C-ABI Core..."
+python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.distro_adapter import DistroAdapter
+
+d = DistroAdapter.detect_distro()
+print(f\" -> Hệ điều hành: {d['name']} ({d['arch']}) | Họ distro: {str(d['family']).upper()} | Package Manager: {d['pkg_manager']}\")
+DistroAdapter.install_user_icons('$ROOT_DIR')
+
+ok, msg = DistroAdapter.ensure_capi_library('$ROOT_DIR')
+print(f' -> Core C-ABI: {msg}')
+if not ok:
+    print(' -> Gợi ý cài đặt công cụ build:', DistroAdapter.get_install_hint('build'))
+    sys.exit(1)
+"
+
 ln -sf libLotusKeyCAPI.so "$ROOT_DIR/lib/libLotusKeyCAPI.so.0"
 
-IBUS_INC="$ROOT_DIR/.ibus_dev/usr/include/ibus-1.0"
-if [ ! -d "$IBUS_INC" ]; then
-    IBUS_INC="/tmp/ibus_dev/usr/include/ibus-1.0"
-fi
-if [ ! -d "$IBUS_INC" ]; then
-    IBUS_INC="/usr/include/ibus-1.0"
-fi
-if [ ! -d "$IBUS_INC" ]; then
-    echo " -> Tự động tải gói header libibus-1.0-dev cục bộ..."
-    mkdir -p "$ROOT_DIR/.ibus_dev"
-    (cd "$ROOT_DIR/.ibus_dev" && apt-get download libibus-1.0-dev && dpkg-deb -x libibus-1.0-dev*.deb .) || true
-    ln -sf /usr/lib/x86_64-linux-gnu/libibus-1.0.so.5 "$ROOT_DIR/.ibus_dev/usr/lib/x86_64-linux-gnu/libibus-1.0.so" 2>/dev/null || true
-    IBUS_INC="$ROOT_DIR/.ibus_dev/usr/include/ibus-1.0"
+# 2. Compile Native C Engines (IBus + UInput Universal Daemon) using multi-distro flags & fallback headers
+echo "[2/6] Biên dịch Native C Engines (ibus-engine-lotuskey & lotuskey-uinput)..."
+CC_BIN="${CC:-gcc}"
+if ! command -v "$CC_BIN" >/dev/null 2>&1; then
+    CC_BIN="cc"
 fi
 
-IBUS_LIB_DIR="$ROOT_DIR/.ibus_dev/usr/lib/x86_64-linux-gnu"
-if [ ! -f "$IBUS_LIB_DIR/libibus-1.0.so" ]; then
-    IBUS_LIB_DIR="/tmp/ibus_dev/usr/lib/x86_64-linux-gnu"
-fi
-if [ ! -f "$IBUS_LIB_DIR/libibus-1.0.so" ]; then
-    IBUS_LIB_DIR="/usr/lib/x86_64-linux-gnu"
-fi
+read -r IBUS_CFLAGS IBUS_LDFLAGS < <(python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.distro_adapter import DistroAdapter
+cflags, ldflags = DistroAdapter.get_ibus_build_flags('$ROOT_DIR')
+print(' '.join(cflags) + '\t' + ' '.join(ldflags))
+" | tr '\t' '\n' | paste -sd ' ' -) || true
 
-gcc -O2 \
-  -I"$IBUS_INC" \
-  -I"$ROOT_DIR/include" \
-  $(pkg-config --cflags gobject-2.0 glib-2.0 gio-2.0) \
+IBUS_CFLAGS_ARR=($(python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.distro_adapter import DistroAdapter
+cflags, _ = DistroAdapter.get_ibus_build_flags('$ROOT_DIR')
+print(' '.join(cflags))
+"))
+
+IBUS_LDFLAGS_ARR=($(python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.distro_adapter import DistroAdapter
+_, ldflags = DistroAdapter.get_ibus_build_flags('$ROOT_DIR')
+print(' '.join(ldflags))
+"))
+
+"$CC_BIN" -O2 -Wall -Wextra \
+  "${IBUS_CFLAGS_ARR[@]}" \
   "$ROOT_DIR/src/main.c" \
-  -L"$IBUS_LIB_DIR" \
+  -Wl,-rpath,'$ORIGIN' \
+  -Wl,-rpath,'$ORIGIN/../lib' \
+  -Wl,-rpath,"$ROOT_DIR/lib" \
+  -Wl,-rpath,/usr/lib/lotuskey \
+  "${IBUS_LDFLAGS_ARR[@]}" \
+  -o "$ROOT_DIR/bin/ibus-engine-lotuskey"
+
+"$CC_BIN" -O2 -Wall -Wextra \
+  -I"$ROOT_DIR/include" \
+  "$ROOT_DIR/src/uinput_daemon.c" \
   -L"$ROOT_DIR/lib" \
   -Wl,-rpath,'$ORIGIN' \
   -Wl,-rpath,'$ORIGIN/../lib' \
   -Wl,-rpath,"$ROOT_DIR/lib" \
   -Wl,-rpath,/usr/lib/lotuskey \
-  -libus-1.0 \
-  $(pkg-config --libs gobject-2.0 glib-2.0 gio-2.0) \
   -lLotusKeyCAPI \
-  -o "$ROOT_DIR/bin/ibus-engine-lotuskey"
+  -o "$ROOT_DIR/bin/lotuskey-uinput"
 
 # Symlink legacy engine name for backwards compatibility
 ln -sf ibus-engine-lotuskey "$ROOT_DIR/bin/ibus-engine-lotus"
 
-# 2. Permissions
-echo "[2/6] Phân quyền thực thi..."
+# 3. Permissions & CLI Symlinks
+echo "[3/6] Phân quyền thực thi & liên kết CLI..."
 chmod +x "$ROOT_DIR/bin/ibus-engine-lotuskey"
+chmod +x "$ROOT_DIR/bin/lotuskey-uinput"
 chmod +x "$ROOT_DIR/bin/lotuskey-menu"
 chmod +x "$ROOT_DIR/bin/lotuskey-setup"
+chmod +x "$ROOT_DIR/bin/lotuskey-installer"
+chmod +x "$ROOT_DIR/bin/lotuskey-wizard"
 chmod +x "$ROOT_DIR/ui/quick_menu.py"
 chmod +x "$ROOT_DIR/ui/setup_panel.py"
+chmod +x "$ROOT_DIR/ui/setup_wizard.py"
 
-# Symlinks in ~/.local/bin for CLI invocation
 mkdir -p ~/.local/bin
 ln -sf "$ROOT_DIR/bin/lotuskey-setup" ~/.local/bin/lotuskey-setup
 ln -sf "$ROOT_DIR/bin/lotuskey-menu" ~/.local/bin/lotuskey-menu
+ln -sf "$ROOT_DIR/bin/lotuskey-uinput" ~/.local/bin/lotuskey-uinput
 ln -sf "$ROOT_DIR/bin/lotuskey-setup" ~/.local/bin/lotuskey
 
-# 3. Copy component XML to user directory
-echo "[3/6] Cập nhật IBus Component XML (ibus-LotusKey)..."
+# 4. Generate and install IBus Component XML & Desktop Entry dynamically
+echo "[4/6] Cập nhật IBus Component XML, Desktop Entry & Icon..."
 mkdir -p ~/.local/share/ibus/component
 rm -f ~/.local/share/ibus/component/lotus.xml
-cp "$ROOT_DIR/engine/lotus.xml" ~/.local/share/ibus/component/lotuskey.xml
+ICON_PATH="$(python3 -c "
+import sys, os
+sys.path.insert(0, '$ROOT_DIR')
+from config.distro_adapter import DistroAdapter
+from config.im_framework import generate_ibus_component_xml
+xml_str = generate_ibus_component_xml(
+    '$ROOT_DIR/bin/ibus-engine-lotuskey',
+    '$ROOT_DIR/bin/lotuskey-setup'
+)
+comp_xml = os.path.expanduser('~/.local/share/ibus/component/lotuskey.xml')
+with open(comp_xml, 'w', encoding='utf-8') as f:
+    f.write(xml_str)
+print(DistroAdapter.get_icon_path(active=True))
+")"
 
-# 4. Desktop Application Entry
-echo "[4/6] Cập nhật Application Shortcut..."
 mkdir -p ~/.local/share/applications
-cat << 'EOF' > ~/.local/share/applications/lotuskey-setup.desktop
+cat << EOF > ~/.local/share/applications/lotuskey-setup.desktop
 [Desktop Entry]
 Name=LotusKey - Bảng điều khiển
-Comment=Cài đặt kiểu gõ Telex, VNI và phím tắt cho bộ gõ tiếng Việt LotusKey (IBus Wayland)
-Exec=/home/victorpham/.gemini/antigravity/scratch/ibus-LotusKey/bin/lotuskey-setup
-Icon=/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg
+Comment=Cài đặt kiểu gõ Telex, VNI, Macro và Multi-Framework (IBus / Fcitx5 / UInput) cho LotusKey
+Exec=$ROOT_DIR/bin/lotuskey-setup
+Icon=$ICON_PATH
 Terminal=false
 Type=Application
 Categories=Settings;Utility;
-Keywords=lotus;lotuskey;unikey;vietnamese;telex;vni;ibus;wayland;
+Keywords=lotus;lotuskey;unikey;vietnamese;telex;vni;ibus;fcitx5;wayland;
 EOF
 
-# Also keep compatibility link
 ln -sf lotuskey-setup.desktop ~/.local/share/applications/ibus-lotus-setup.desktop
 
-# 5. Initialize config files & Autostart
-echo "[5/6] Khởi tạo cấu hình LotusKey & Autostart..."
+# 5. Initialize config files, Macros & Multi-Distro / Multi-Framework Sync
+echo "[5/6] Khởi tạo cấu hình LotusKey, Bảng gõ tắt & Multi-Framework Sync..."
 python3 -c "
-import sys, os
+import sys
 sys.path.insert(0, '$ROOT_DIR')
-from config.config_manager import load_config, save_config
+from config.config_manager import load_config, save_config, load_macros
+from config.im_framework import apply_framework_config
 cfg = load_config()
+macros = load_macros()
 cfg['autostart'] = True
 save_config(cfg)
+eff = apply_framework_config(cfg, macros, switch_daemon=False)
+print(' -> Hệ thống bộ gõ đang kích hoạt:', eff.upper())
 "
 
-# 6. Update IBus Registry cache & GNOME Sources
-echo "[6/6] Đồng bộ IBus Registry Cache & GNOME Input Sources..."
+# 6. Update IBus Registry cache & Active IM Backend
+echo "[6/6] Đồng bộ IBus Registry Cache & Kích hoạt bộ gõ..."
 python3 -c "
 import os
 import gi
@@ -116,17 +178,20 @@ reg = IBus.Registry.new()
 reg.load()
 reg.load_in_dir(os.path.expanduser('~/.local/share/ibus/component'))
 cache_path = os.path.expanduser('~/.cache/ibus/bus/registry')
+os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 ok = reg.save_cache_file(cache_path)
 if ok:
     print(' -> Đã ghi registry cache thành công:', cache_path)
-else:
-    print(' -> Cảnh báo: Không thể ghi cache!')
-"
+" 2>/dev/null || true
 
-gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]"
-gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]"
-ibus restart
-sleep 1
-ibus engine lotuskey || ibus engine lotus || true
+if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
+    gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
+fi
+if command -v ibus >/dev/null 2>&1; then
+    ibus restart 2>/dev/null || true
+    sleep 1
+    ibus engine lotuskey 2>/dev/null || ibus engine lotus 2>/dev/null || true
+fi
 
-echo "=== Hoàn tất! Bộ gõ LotusKey đã sẵn sàng hoạt động cùng hệ thống trên GNOME Wayland! ==="
+echo "=== Hoàn tất! Bộ gõ LotusKey đã sẵn sàng hoạt động trên mọi bản phân phối Linux! ==="

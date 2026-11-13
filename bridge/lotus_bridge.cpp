@@ -40,6 +40,24 @@ static std::string u32_to_utf8(const std::u32string& s) {
     return out;
 }
 
+static lotus::Charset map_charset_id(int charset_id) {
+    switch (charset_id) {
+        case 0:  return lotus::Charset::Unicode;
+        case 5:
+        case 27: return lotus::Charset::Tcvn3Abc;
+        case 9:
+        case 31: return lotus::Charset::UnicodeCombining;
+        case 10: return lotus::Charset::Viqr;
+        case 12:
+        case 34: return lotus::Charset::VniWindows;
+        default:
+            if (charset_id >= 0 && charset_id < static_cast<int>(lotus::data::kCharsetCount)) {
+                return static_cast<lotus::Charset>(charset_id);
+            }
+            return lotus::Charset::Unicode;
+    }
+}
+
 static std::string format_output(const LotusBridge* b, const std::u32string& u32) {
     if (b->charset == lotus::Charset::Unicode || b->charset == lotus::Charset::Utf8) {
         return u32_to_utf8(u32);
@@ -51,7 +69,7 @@ LotusBridge* lotus_bridge_create(int method_id, uint32_t flags, int charset_id) 
     auto* b = new LotusBridge();
     b->input_method_id = method_id;
     b->flags = flags;
-    b->charset = static_cast<lotus::Charset>(charset_id);
+    b->charset = map_charset_id(charset_id);
     auto im = static_cast<lotus::InputMethodId>(method_id);
     b->engine = std::make_unique<lotus::Engine>(lotus::cachedInputMethod(im), lotus::EngineFlags{flags});
     b->prev_u32 = U"";
@@ -82,7 +100,7 @@ void lotus_bridge_set_flags(LotusBridge* b, uint32_t flags) {
 
 void lotus_bridge_set_charset(LotusBridge* b, int charset_id) {
     if (!b) return;
-    b->charset = static_cast<lotus::Charset>(charset_id);
+    b->charset = map_charset_id(charset_id);
 }
 
 void lotus_bridge_set_method(LotusBridge* b, int method_id) {

@@ -1,12 +1,13 @@
 /*
  * LotusKey (ibus-LotusKey) - Native IBus Engine
  * Author: Victor Pham
- * High-performance Vietnamese Input Method Engine for GNOME Wayland
+ * High-performance Vietnamese Input Method Engine for Linux (Wayland & X11)
  * Powered by pure C-ABI Bridge (LotusKey Core)
  */
 
 #include <ibus.h>
 #include <gio/gio.h>
+#include <glib-unix.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -18,8 +19,12 @@
 #include <stdarg.h>
 #include <signal.h>
 #include "lotuskey.h"
+#include "lotus_charset.h"
+
+static gboolean g_debug_enabled = FALSE;
 
 static void log_debug(const char *fmt, ...) {
+    if (G_LIKELY(!g_debug_enabled)) return;
     FILE *fp = fopen("/tmp/ibus_lotus.log", "a");
     if (!fp) return;
     va_list args;
@@ -42,6 +47,12 @@ enum {
     TOGGLE_NONE = 4          /* No shortcut */
 };
 
+enum {
+    IM_TELEX = 0,
+    IM_VNI = 1,
+    IM_TELEX_VNI = 2
+};
+
 typedef struct _IBusLotusEngine IBusLotusEngine;
 typedef struct _IBusLotusEngineClass IBusLotusEngineClass;
 
@@ -50,6 +61,7 @@ struct _IBusLotusEngine {
     lotuskey_session_t session;
     gboolean enabled;
     gboolean is_vni;
+    gint input_method;      /* 0: Telex, 1: VNI, 2: Telex+VNI */
     gboolean smart_bilingual;
     gboolean sen_flex;
     gboolean modern_orthography;
@@ -61,14 +73,19 @@ struct _IBusLotusEngine {
     gboolean grave_menu_enabled;
     gboolean w2u;
     gboolean bracket_transform;
+    gboolean macro_enabled;
     gboolean autostart;
     gchar *output_mode;
+    gchar *im_framework;
     gint charset;
     gint toggle_mode;
+    guint client_caps;
+    gchar prev_surrounding[512];
+    gchar last_bracket_key;
     gboolean ctrl_pressed;
     gboolean shift_pressed;
     gboolean other_key_in_chord;
-    gint64 last_grave_time_ms;
+    guint grave_timer_id;
     time_t config_mtime;
     IBusPropList *prop_list;
 };
@@ -80,11 +97,15 @@ struct _IBusLotusEngineClass {
 GType ibus_lotus_engine_get_type(void);
 G_DEFINE_TYPE(IBusLotusEngine, ibus_lotus_engine, IBUS_TYPE_ENGINE)
 
-static gint64 get_current_time_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return ((gint64)tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
-}
+static GList *active_engines = NULL;
+static GFileMonitor *g_config_monitor = NULL;
+static GFileMonitor *g_macro_monitor = NULL;
+static LotusMacroTable g_macro_table = { .count = 0 };
+static guint32 g_notify_replace_id = 0;
+
+static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine);
+static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine);
+static void ibus_lotus_spawn_tool(const char *tool_name);
 
 static gchar *ibus_lotus_get_config_dir(void) {
     const gchar *cfg_root = g_get_user_config_dir();
@@ -94,11 +115,17 @@ static gchar *ibus_lotus_get_config_dir(void) {
     return g_build_filename(cfg_root, "LotusKey", NULL);
 }
 
-static GList *active_engines = NULL;
-static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine);
-static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine);
+static void ibus_lotus_reload_macros(void) {
+    gchar *dir_path = ibus_lotus_get_config_dir();
+    if (!dir_path) return;
+    gchar *macro_path = g_build_filename(dir_path, "macros.conf", NULL);
+    lotus_macro_table_load(&g_macro_table, macro_path);
+    g_free(macro_path);
+    g_free(dir_path);
+}
 
 static void ibus_lotus_reload_all_engines(void) {
+    ibus_lotus_reload_macros();
     for (GList *l = active_engines; l != NULL; l = l->next) {
         IBusLotusEngine *vl = (IBusLotusEngine *)l->data;
         ibus_lotus_load_user_config(vl);
@@ -107,25 +134,61 @@ static void ibus_lotus_reload_all_engines(void) {
     }
 }
 
-static void sigusr1_handler(int sig) {
-    (void)sig;
+static gboolean on_sigusr1_unix_signal(gpointer user_data) {
+    (void)user_data;
     ibus_lotus_reload_all_engines();
+    return G_SOURCE_CONTINUE;
 }
 
-static void ibus_lotus_check_and_reload_config(IBusLotusEngine *vl_engine) {
-    gchar *dir_path = ibus_lotus_get_config_dir();
-    if (!dir_path) return;
-    gchar *path = g_build_filename(dir_path, "config.env", NULL);
-    g_free(dir_path);
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        if (st.st_mtime != vl_engine->config_mtime) {
-            ibus_lotus_load_user_config(vl_engine);
-            ibus_lotus_build_prop_list(vl_engine);
-            ibus_engine_register_properties((IBusEngine *)vl_engine, vl_engine->prop_list);
-        }
+static void on_config_file_changed(GFileMonitor *monitor, GFile *file, GFile *other_file,
+                                   GFileMonitorEvent event_type, gpointer user_data) {
+    (void)monitor;
+    (void)file;
+    (void)other_file;
+    (void)user_data;
+    if (event_type == G_FILE_MONITOR_EVENT_CHANGED ||
+        event_type == G_FILE_MONITOR_EVENT_CREATED ||
+        event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
+        ibus_lotus_reload_all_engines();
     }
-    g_free(path);
+}
+
+static void ibus_lotus_send_notification(const char *summary, const char *body, const char *icon) {
+    GDBusConnection *conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!conn) return;
+
+    GVariantBuilder actions_builder;
+    g_variant_builder_init(&actions_builder, G_VARIANT_TYPE("as"));
+
+    GVariantBuilder hints_builder;
+    g_variant_builder_init(&hints_builder, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&hints_builder, "{sv}",
+                          "x-canonical-private-synchronous",
+                          g_variant_new_string("lotus-toggle"));
+
+    g_dbus_connection_call(
+        conn,
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify",
+        g_variant_new("(susssasa{sv}i)",
+                      "LotusKey",
+                      g_notify_replace_id,
+                      icon ? icon : "",
+                      summary ? summary : "LotusKey",
+                      body ? body : "",
+                      &actions_builder,
+                      &hints_builder,
+                      1200),
+        G_VARIANT_TYPE("(u)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        500,
+        NULL,
+        NULL,
+        NULL
+    );
+    g_object_unref(conn);
 }
 
 static void ibus_lotus_clear_preedit(IBusEngine *engine) {
@@ -140,23 +203,105 @@ static void ibus_lotus_clear_preedit(IBusEngine *engine) {
     ibus_engine_hide_preedit_text(engine);
 }
 
+static void ibus_lotus_cancel_grave_timer(IBusLotusEngine *vl_engine) {
+    if (vl_engine->grave_timer_id != 0) {
+        g_source_remove(vl_engine->grave_timer_id);
+        vl_engine->grave_timer_id = 0;
+    }
+}
+
 static void ibus_lotus_engine_reset_internal(IBusLotusEngine *vl_engine) {
     vl_engine->replayed_after_backspace = FALSE;
     vl_engine->ctrl_pressed = FALSE;
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
+    vl_engine->last_bracket_key = 0;
+    vl_engine->prev_surrounding[0] = '\0';
+    ibus_lotus_cancel_grave_timer(vl_engine);
     if (vl_engine->session) {
         lotuskey_reset_session(vl_engine->session);
     }
     ibus_lotus_clear_preedit((IBusEngine *)vl_engine);
 }
 
+static gboolean ibus_lotus_use_preedit_mode(IBusLotusEngine *vl_engine) {
+    if (!vl_engine->output_mode || g_strcmp0(vl_engine->output_mode, "preedit") == 0) {
+        return TRUE;
+    }
+    if (g_strcmp0(vl_engine->output_mode, "surrounding") == 0) {
+        if (!(vl_engine->client_caps & IBUS_CAP_SURROUNDING_TEXT)) {
+            return TRUE; /* Auto-fallback to preedit for Electron/Chromium */
+        }
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static size_t ibus_lotus_utf8_char_len(unsigned char b) {
+    if ((b & 0x80) == 0) return 1;
+    if ((b & 0xE0) == 0xC0) return 2;
+    if ((b & 0xF0) == 0xE0) return 3;
+    if ((b & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+static size_t ibus_lotus_utf8_codepoint_count(const char *utf8_str) {
+    if (!utf8_str) return 0;
+    size_t count = 0;
+    for (const unsigned char *p = (const unsigned char *)utf8_str; *p; p++) {
+        if ((*p & 0xC0) != 0x80) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void ibus_lotus_sync_direct_output(IBusLotusEngine *vl_engine, const char *target_utf8) {
+    IBusEngine *engine = (IBusEngine *)vl_engine;
+    char converted[1024];
+    lotus_convert_charset(target_utf8 ? target_utf8 : "", vl_engine->charset, converted, sizeof(converted));
+
+    const char *prev = vl_engine->prev_surrounding;
+    size_t common_bytes = 0;
+    while (prev[common_bytes] != '\0' && converted[common_bytes] != '\0' &&
+           prev[common_bytes] == converted[common_bytes]) {
+        common_bytes++;
+    }
+    /* Align common_bytes back to UTF-8 codepoint boundary */
+    while (common_bytes > 0 && ((unsigned char)converted[common_bytes] & 0xC0) == 0x80) {
+        common_bytes--;
+    }
+
+    size_t del_chars = ibus_lotus_utf8_codepoint_count(prev + common_bytes);
+    const char *append_str = converted + common_bytes;
+
+    if (g_strcmp0(vl_engine->output_mode, "forward") == 0) {
+        for (size_t i = 0; i < del_chars; i++) {
+            ibus_engine_forward_key_event(engine, IBUS_KEY_BackSpace, 14, 0);
+            ibus_engine_forward_key_event(engine, IBUS_KEY_BackSpace, 14, IBUS_RELEASE_MASK);
+        }
+    } else if (del_chars > 0) {
+        ibus_engine_delete_surrounding_text(engine, -(gint)del_chars, (guint)del_chars);
+    }
+
+    if (append_str[0] != '\0') {
+        IBusText *commit_text = ibus_text_new_from_string(append_str);
+        ibus_engine_commit_text(engine, commit_text);
+    }
+
+    snprintf(vl_engine->prev_surrounding, sizeof(vl_engine->prev_surrounding), "%s", converted);
+}
+
 static void ibus_lotus_commit_composing(IBusLotusEngine *vl_engine, const char *trailing_ascii) {
     IBusEngine *engine = (IBusEngine *)vl_engine;
-    char buf[1024];
-    buf[0] = '\0';
+    char word_utf8[1024];
+    word_utf8[0] = '\0';
 
     if (vl_engine->session && lotuskey_is_composing(vl_engine->session)) {
+        const char *raw_before = lotuskey_get_raw_text(vl_engine->session);
+        char raw_copy[256];
+        snprintf(raw_copy, sizeof(raw_copy), "%s", raw_before ? raw_before : "");
+
         if (trailing_ascii && trailing_ascii[0] != '\0' && trailing_ascii[1] == '\0') {
             uint32_t cp = (uint32_t)(unsigned char)trailing_ascii[0];
             lotuskey_feed_char(vl_engine->session, cp);
@@ -165,19 +310,44 @@ static void ibus_lotus_commit_composing(IBusLotusEngine *vl_engine, const char *
         }
         const char *committed = lotuskey_get_last_text(vl_engine->session);
         if (committed && committed[0] != '\0') {
-            snprintf(buf, sizeof(buf), "%s", committed);
+            snprintf(word_utf8, sizeof(word_utf8), "%s", committed);
+        }
+
+        /* Check Macro Table expansion (Gõ tắt) */
+        if (vl_engine->macro_enabled && g_macro_table.count > 0) {
+            char expanded[512];
+            if (lotus_macro_lookup(&g_macro_table, word_utf8, expanded, sizeof(expanded)) ||
+                (raw_copy[0] != '\0' && lotus_macro_lookup(&g_macro_table, raw_copy, expanded, sizeof(expanded)))) {
+                snprintf(word_utf8, sizeof(word_utf8), "%s", expanded);
+            }
         }
     }
+
+    if (!ibus_lotus_use_preedit_mode(vl_engine)) {
+        /* In direct mode (surrounding / forward), sync any final changes + trailing_ascii */
+        char final_full[1024];
+        snprintf(final_full, sizeof(final_full), "%s%s",
+                 word_utf8,
+                 (trailing_ascii && trailing_ascii[0] != '\0') ? trailing_ascii : "");
+        if (final_full[0] != '\0') {
+            ibus_lotus_sync_direct_output(vl_engine, final_full);
+        }
+        ibus_lotus_engine_reset_internal(vl_engine);
+        return;
+    }
+
+    char converted[1024];
+    lotus_convert_charset(word_utf8, vl_engine->charset, converted, sizeof(converted));
 
     if (trailing_ascii && trailing_ascii[0] != '\0') {
-        size_t len = strlen(buf);
-        if (len < sizeof(buf) - 1) {
-            snprintf(buf + len, sizeof(buf) - len, "%s", trailing_ascii);
+        size_t len = strlen(converted);
+        if (len < sizeof(converted) - 1) {
+            snprintf(converted + len, sizeof(converted) - len, "%s", trailing_ascii);
         }
     }
 
-    if (buf[0] != '\0') {
-        IBusText *commit_text = ibus_text_new_from_string(buf);
+    if (converted[0] != '\0') {
+        IBusText *commit_text = ibus_text_new_from_string(converted);
         ibus_engine_commit_text(engine, commit_text);
     }
 
@@ -189,7 +359,18 @@ static void ibus_lotus_update_preedit(IBusLotusEngine *vl_engine) {
     if (vl_engine->session && lotuskey_is_composing(vl_engine->session)) {
         const char *composing = lotuskey_get_composing_text(vl_engine->session);
         if (composing && composing[0] != '\0') {
-            IBusText *text = ibus_text_new_from_string(composing);
+            if (!ibus_lotus_use_preedit_mode(vl_engine)) {
+                ibus_lotus_sync_direct_output(vl_engine, composing);
+                return;
+            }
+            char converted[1024];
+            /* For preedit display, keep readable UTF-8 if TCVN3/VNI-Win, or convert if Combining */
+            if (vl_engine->charset == LOTUS_CHARSET_COMBINING_CFG || vl_engine->charset == LOTUS_CHARSET_COMBINING_ENUM) {
+                lotus_convert_charset(composing, vl_engine->charset, converted, sizeof(converted));
+            } else {
+                snprintf(converted, sizeof(converted), "%s", composing);
+            }
+            IBusText *text = ibus_text_new_from_string(converted);
             guint char_len = ibus_text_get_length(text);
             guint ul_mode = vl_engine->preedit_underline ? IBUS_ATTR_UNDERLINE_SINGLE : IBUS_ATTR_UNDERLINE_NONE;
             ibus_text_append_attribute(text, IBUS_ATTR_TYPE_UNDERLINE, ul_mode, 0, (gint)char_len);
@@ -202,6 +383,9 @@ static void ibus_lotus_update_preedit(IBusLotusEngine *vl_engine) {
             );
             return;
         }
+    }
+    if (!ibus_lotus_use_preedit_mode(vl_engine) && vl_engine->prev_surrounding[0] != '\0') {
+        ibus_lotus_sync_direct_output(vl_engine, "");
     }
     ibus_lotus_clear_preedit(engine);
 }
@@ -230,14 +414,20 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
 
     char line[256];
     gboolean has_input_method_override = FALSE;
-    gboolean config_is_vni = FALSE;
+    gint config_im = IM_TELEX;
 
     while (fgets(line, sizeof(line), fp)) {
         if (strncmp(line, "ENABLED=", 8) == 0) {
             vl_engine->enabled = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         } else if (strncmp(line, "INPUT_METHOD=", 13) == 0) {
             has_input_method_override = TRUE;
-            config_is_vni = (strstr(line, "vni") != NULL || strstr(line, "VNI") != NULL);
+            if (strstr(line, "telex_vni") != NULL || strstr(line, "TELEX_VNI") != NULL) {
+                config_im = IM_TELEX_VNI;
+            } else if (strstr(line, "vni") != NULL || strstr(line, "VNI") != NULL) {
+                config_im = IM_VNI;
+            } else {
+                config_im = IM_TELEX;
+            }
         } else if (strncmp(line, "GRAMMAR_PROFILE=", 16) == 0) {
             vl_engine->sen_flex = (strstr(line, "classic") == NULL);
         } else if (strncmp(line, "SMART_BILINGUAL=", 16) == 0) {
@@ -268,13 +458,23 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
             vl_engine->w2u = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         } else if (strncmp(line, "BRACKET_TRANSFORM=", 18) == 0) {
             vl_engine->bracket_transform = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "MACRO_ENABLED=", 14) == 0) {
+            vl_engine->macro_enabled = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         } else if (strncmp(line, "OUTPUT_MODE=", 12) == 0) {
             if (vl_engine->output_mode) g_free(vl_engine->output_mode);
             if (strstr(line, "surrounding")) vl_engine->output_mode = g_strdup("surrounding");
             else if (strstr(line, "forward")) vl_engine->output_mode = g_strdup("forward");
             else vl_engine->output_mode = g_strdup("preedit");
+        } else if (strncmp(line, "IM_FRAMEWORK=", 13) == 0) {
+            if (vl_engine->im_framework) g_free(vl_engine->im_framework);
+            if (strstr(line, "fcitx5")) vl_engine->im_framework = g_strdup("fcitx5");
+            else if (strstr(line, "uinput")) vl_engine->im_framework = g_strdup("uinput");
+            else if (strstr(line, "ibus")) vl_engine->im_framework = g_strdup("ibus");
+            else vl_engine->im_framework = g_strdup("auto");
         } else if (strncmp(line, "CHARSET=", 8) == 0) {
-            vl_engine->charset = atoi(line + 8);
+            const char *val_p = line + 8;
+            while (*val_p == '"' || *val_p == '\'' || *val_p == ' ') val_p++;
+            vl_engine->charset = atoi(val_p);
         } else if (strncmp(line, "AUTOSTART=", 10) == 0) {
             vl_engine->autostart = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         }
@@ -282,10 +482,12 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
     fclose(fp);
 
     const gchar *engine_name = ibus_engine_get_name((IBusEngine *)vl_engine);
-    if (engine_name && strstr(engine_name, "vni") != NULL) {
+    if (has_input_method_override) {
+        vl_engine->input_method = config_im;
+        vl_engine->is_vni = (config_im == IM_VNI);
+    } else if (engine_name && strstr(engine_name, "vni") != NULL) {
+        vl_engine->input_method = IM_VNI;
         vl_engine->is_vni = TRUE;
-    } else if (has_input_method_override) {
-        vl_engine->is_vni = config_is_vni;
     }
 
     lotuskey_set_input_method(
@@ -321,8 +523,12 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     else if (vl_engine->toggle_mode == TOGGLE_SHIFT_SPACE) tm_str = "Shift+Space";
     else if (vl_engine->toggle_mode == TOGGLE_NONE) tm_str = "None";
 
+    const char *im_str = "telex";
+    if (vl_engine->input_method == IM_VNI) im_str = "vni";
+    else if (vl_engine->input_method == IM_TELEX_VNI) im_str = "telex_vni";
+
     fprintf(fp, "ENABLED=\"%s\"\n", vl_engine->enabled ? "true" : "false");
-    fprintf(fp, "INPUT_METHOD=\"%s\"\n", vl_engine->is_vni ? "vni" : "telex");
+    fprintf(fp, "INPUT_METHOD=\"%s\"\n", im_str);
     fprintf(fp, "GRAMMAR_PROFILE=\"%s\"\n", vl_engine->sen_flex ? "sen_flex" : "classic");
     fprintf(fp, "SMART_BILINGUAL=\"%s\"\n", vl_engine->smart_bilingual ? "true" : "false");
     fprintf(fp, "MODERN_ORTHOGRAPHY=\"%s\"\n", vl_engine->modern_orthography ? "true" : "false");
@@ -332,7 +538,9 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     fprintf(fp, "TOGGLE_KEY=\"%s\"\n", tm_str);
     fprintf(fp, "W2U=\"%s\"\n", vl_engine->w2u ? "true" : "false");
     fprintf(fp, "BRACKET_TRANSFORM=\"%s\"\n", vl_engine->bracket_transform ? "true" : "false");
+    fprintf(fp, "MACRO_ENABLED=\"%s\"\n", vl_engine->macro_enabled ? "true" : "false");
     fprintf(fp, "OUTPUT_MODE=\"%s\"\n", vl_engine->output_mode ? vl_engine->output_mode : "preedit");
+    fprintf(fp, "IM_FRAMEWORK=\"%s\"\n", vl_engine->im_framework ? vl_engine->im_framework : "auto");
     fprintf(fp, "CHARSET=\"%d\"\n", vl_engine->charset);
     fprintf(fp, "AUTOSTART=\"%s\"\n", vl_engine->autostart ? "true" : "false");
     fclose(fp);
@@ -343,20 +551,22 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     }
     g_free(path);
 
-    // Also synchronize config.json
+    /* Synchronize config.json */
     gchar *path_json = g_build_filename(dir_path, "config.json", NULL);
     FILE *fp_json = fopen(path_json, "w");
     if (fp_json) {
         fprintf(fp_json, "{\n");
         fprintf(fp_json, "    \"enabled\": %s,\n", vl_engine->enabled ? "true" : "false");
-        fprintf(fp_json, "    \"input_method\": %d,\n", vl_engine->is_vni ? 1 : 0);
+        fprintf(fp_json, "    \"input_method\": %d,\n", vl_engine->input_method);
         fprintf(fp_json, "    \"output_mode\": \"%s\",\n", vl_engine->output_mode ? vl_engine->output_mode : "preedit");
+        fprintf(fp_json, "    \"im_framework\": \"%s\",\n", vl_engine->im_framework ? vl_engine->im_framework : "auto");
         fprintf(fp_json, "    \"charset\": %d,\n", vl_engine->charset);
         fprintf(fp_json, "    \"free_tone_marking\": %s,\n", vl_engine->sen_flex ? "true" : "false");
         fprintf(fp_json, "    \"modern_tone_style\": %s,\n", vl_engine->modern_orthography ? "true" : "false");
         fprintf(fp_json, "    \"auto_correct\": %s,\n", vl_engine->smart_bilingual ? "true" : "false");
         fprintf(fp_json, "    \"w2u\": %s,\n", vl_engine->w2u ? "true" : "false");
         fprintf(fp_json, "    \"bracket_transform\": %s,\n", vl_engine->bracket_transform ? "true" : "false");
+        fprintf(fp_json, "    \"macro_enabled\": %s,\n", vl_engine->macro_enabled ? "true" : "false");
         fprintf(fp_json, "    \"toggle_key\": \"%s\",\n", tm_str);
         fprintf(fp_json, "    \"mode_menu_key\": \"%s\",\n", vl_engine->grave_menu_enabled ? "grave" : "None");
         fprintf(fp_json, "    \"quick_telex\": %s,\n", vl_engine->quick_telex ? "true" : "false");
@@ -379,10 +589,14 @@ static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
     IBusProperty *prop;
     IBusText *label;
 
-    char status_str[64];
+    const char *im_label = "Telex";
+    if (vl_engine->input_method == IM_VNI) im_label = "VNI";
+    else if (vl_engine->input_method == IM_TELEX_VNI) im_label = "Telex+VNI";
+
+    char status_str[80];
     snprintf(status_str, sizeof(status_str), "LotusKey: %s [%s]",
              vl_engine->enabled ? "Tiếng Việt" : "English",
-             vl_engine->is_vni ? "VNI" : "Telex");
+             im_label);
 
     label = ibus_text_new_from_string(status_str);
     prop = ibus_property_new("lotus-status", PROP_TYPE_NORMAL, label, NULL, NULL,
@@ -424,12 +638,36 @@ static void ibus_lotus_toggle_vietnamese(IBusLotusEngine *vl_engine) {
     ibus_lotus_build_prop_list(vl_engine);
     ibus_engine_register_properties((IBusEngine *)vl_engine, vl_engine->prop_list);
 
-    // Desktop Notification feedback
-    if (vl_engine->enabled) {
-        g_spawn_command_line_async("notify-send -t 1200 -h string:x-canonical-private-synchronous:lotus-toggle -i /usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg 'LotusKey' '🇻🇳 Chế độ Tiếng Việt (ON)'", NULL);
-    } else {
-        g_spawn_command_line_async("notify-send -t 1200 -h string:x-canonical-private-synchronous:lotus-toggle 'LotusKey' '🇬🇧 Chế độ Tiếng Anh / English (OFF)'", NULL);
+    const gchar *home = g_get_home_dir();
+    gchar *custom_icon = NULL;
+    if (home) {
+        custom_icon = g_build_filename(
+            home, ".local", "share", "icons", "hicolor", "scalable", "apps",
+            vl_engine->enabled ? "lotuskey.svg" : "lotuskey-off.svg",
+            NULL
+        );
     }
+    const char *fallback_icon = vl_engine->enabled
+        ? "/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg"
+        : "/usr/share/icons/hicolor/scalable/apps/fcitx-lotus-off.svg";
+    const char *icon_to_use = (custom_icon && g_file_test(custom_icon, G_FILE_TEST_EXISTS))
+        ? custom_icon
+        : (g_file_test(fallback_icon, G_FILE_TEST_EXISTS) ? fallback_icon : "input-keyboard");
+
+    if (vl_engine->enabled) {
+        ibus_lotus_send_notification(
+            "LotusKey",
+            "🇻🇳 Chế độ Tiếng Việt (ON)",
+            icon_to_use
+        );
+    } else {
+        ibus_lotus_send_notification(
+            "LotusKey",
+            "🇬🇧 Chế độ Tiếng Anh / English (OFF)",
+            icon_to_use
+        );
+    }
+    if (custom_icon) g_free(custom_icon);
 }
 
 typedef struct {
@@ -456,25 +694,6 @@ static const LotusUtf8CharMap kVnUtf8Map[] = {
     { "ư", "Ư", 'u', 'U', 4, 0 }, { "ừ", "Ừ", 'u', 'U', 4, 1 }, { "ứ", "Ứ", 'u', 'U', 4, 2 }, { "ử", "Ử", 'u', 'U', 4, 3 }, { "ữ", "Ữ", 'u', 'U', 4, 4 }, { "ự", "Ự", 'u', 'U', 4, 5 },
     { "ỳ", "Ỳ", 'y', 'Y', 0, 1 }, { "ý", "Ý", 'y', 'Y', 0, 2 }, { "ỷ", "Ỷ", 'y', 'Y', 0, 3 }, { "ỹ", "Ỹ", 'y', 'Y', 0, 4 }, { "ỵ", "Ỵ", 'y', 'Y', 0, 5 },
 };
-
-static size_t ibus_lotus_utf8_char_len(unsigned char b) {
-    if ((b & 0x80) == 0) return 1;
-    if ((b & 0xE0) == 0xC0) return 2;
-    if ((b & 0xF0) == 0xE0) return 3;
-    if ((b & 0xF8) == 0xF0) return 4;
-    return 1;
-}
-
-static size_t ibus_lotus_utf8_codepoint_count(const char *utf8_str) {
-    if (!utf8_str) return 0;
-    size_t count = 0;
-    for (const unsigned char *p = (const unsigned char *)utf8_str; *p; p++) {
-        if ((*p & 0xC0) != 0x80) {
-            count++;
-        }
-    }
-    return count;
-}
 
 static void ibus_lotus_raw_keys_for_utf8(const char *utf8_str, gboolean is_vni, char *out, size_t out_cap) {
     size_t len = 0;
@@ -588,6 +807,7 @@ static void ibus_lotus_replay_raw_keys(IBusLotusEngine *vl_engine, const char *r
 }
 
 static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
+    vl_engine->last_bracket_key = 0;
     const char *composing = lotuskey_get_composing_text(vl_engine->session);
     if (!composing || composing[0] == '\0') {
         ibus_lotus_engine_reset_internal(vl_engine);
@@ -640,10 +860,63 @@ static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
     }
 }
 
+static gboolean ibus_lotus_grave_timeout_cb(gpointer user_data) {
+    IBusLotusEngine *vl_engine = (IBusLotusEngine *)user_data;
+    vl_engine->grave_timer_id = 0;
+    ibus_lotus_spawn_tool("lotuskey-menu");
+    return G_SOURCE_REMOVE;
+}
+
+/* Translate VNI digit key ('0'..'9') to Telex equivalent when in Telex+VNI hybrid mode */
+static char ibus_lotus_translate_vni_digit_for_hybrid(IBusLotusEngine *vl_engine, guint keyval) {
+    switch (keyval) {
+        case '1': return 's';
+        case '2': return 'f';
+        case '3': return 'r';
+        case '4': return 'x';
+        case '5': return 'j';
+        case '7':
+        case '8': return 'w';
+        case '9': return 'd';
+        case '0': return 'z';
+        case '6': {
+            const char *comp = lotuskey_get_composing_text(vl_engine->session);
+            if (comp) {
+                /* Find the last vowel a/e/o in composing text to apply circumflex */
+                char chosen = 0;
+                for (const char *p = comp; *p; ) {
+                    size_t clen = ibus_lotus_utf8_char_len((unsigned char)*p);
+                    if (clen == 1) {
+                        char lower = vl_tolower(*p);
+                        if (lower == 'a' || lower == 'e' || lower == 'o') {
+                            chosen = lower;
+                        }
+                    } else {
+                        for (size_t i = 0; i < sizeof(kVnUtf8Map) / sizeof(kVnUtf8Map[0]); i++) {
+                            if ((strlen(kVnUtf8Map[i].lower_utf8) == clen && strncmp(p, kVnUtf8Map[i].lower_utf8, clen) == 0) ||
+                                (strlen(kVnUtf8Map[i].upper_utf8) == clen && strncmp(p, kVnUtf8Map[i].upper_utf8, clen) == 0)) {
+                                char b = kVnUtf8Map[i].lower_base;
+                                if (b == 'a' || b == 'e' || b == 'o') chosen = b;
+                                break;
+                            }
+                        }
+                    }
+                    p += clen;
+                }
+                if (chosen != 0) return chosen;
+            }
+            return 0;
+        }
+        default:
+            return 0;
+    }
+}
+
 static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
     vl_engine->session = lotuskey_create_session();
     vl_engine->enabled = TRUE;
     vl_engine->is_vni = FALSE;
+    vl_engine->input_method = IM_TELEX;
     vl_engine->smart_bilingual = TRUE;
     vl_engine->sen_flex = TRUE;
     vl_engine->modern_orthography = TRUE;
@@ -655,14 +928,19 @@ static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
     vl_engine->grave_menu_enabled = TRUE;
     vl_engine->w2u = TRUE;
     vl_engine->bracket_transform = TRUE;
+    vl_engine->macro_enabled = TRUE;
     vl_engine->autostart = TRUE;
     vl_engine->output_mode = g_strdup("preedit");
+    vl_engine->im_framework = g_strdup("auto");
     vl_engine->charset = 0;
     vl_engine->toggle_mode = TOGGLE_BOTH;
+    vl_engine->client_caps = 0;
+    vl_engine->prev_surrounding[0] = '\0';
+    vl_engine->last_bracket_key = 0;
     vl_engine->ctrl_pressed = FALSE;
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
-    vl_engine->last_grave_time_ms = 0;
+    vl_engine->grave_timer_id = 0;
     vl_engine->prop_list = NULL;
 
     active_engines = g_list_append(active_engines, vl_engine);
@@ -675,9 +953,14 @@ static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
 static void ibus_lotus_engine_finalize(GObject *object) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)object;
     active_engines = g_list_remove(active_engines, vl_engine);
+    ibus_lotus_cancel_grave_timer(vl_engine);
     if (vl_engine->output_mode) {
         g_free(vl_engine->output_mode);
         vl_engine->output_mode = NULL;
+    }
+    if (vl_engine->im_framework) {
+        g_free(vl_engine->im_framework);
+        vl_engine->im_framework = NULL;
     }
     if (vl_engine->prop_list) {
         g_object_unref(vl_engine->prop_list);
@@ -704,9 +987,11 @@ static void ibus_lotus_engine_enable(IBusEngine *engine) {
     const gchar *engine_name = ibus_engine_get_name(engine);
     if (engine_name && strstr(engine_name, "vni") != NULL) {
         vl_engine->is_vni = TRUE;
+        vl_engine->input_method = IM_VNI;
         lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_VNI);
     } else {
         vl_engine->is_vni = FALSE;
+        vl_engine->input_method = IM_TELEX;
         lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_TELEX);
     }
     ibus_lotus_load_user_config(vl_engine);
@@ -753,6 +1038,7 @@ static void ibus_lotus_engine_focus_out(IBusEngine *engine) {
     vl_engine->ctrl_pressed = FALSE;
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
+    ibus_lotus_cancel_grave_timer(vl_engine);
     if (lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     } else {
@@ -762,6 +1048,14 @@ static void ibus_lotus_engine_focus_out(IBusEngine *engine) {
         lotuskey_append_context(vl_engine->session, "");
     }
     IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->focus_out(engine);
+}
+
+static void ibus_lotus_engine_set_capabilities(IBusEngine *engine, guint caps) {
+    IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
+    vl_engine->client_caps = caps;
+    if (IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->set_capabilities) {
+        IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->set_capabilities(engine, caps);
+    }
 }
 
 static void ibus_lotus_engine_set_content_type(IBusEngine *engine, guint purpose, guint hints) {
@@ -840,17 +1134,13 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
     (void)keycode;
 
-    // Check if configuration on disk has changed and hot-reload
-    ibus_lotus_check_and_reload_config(vl_engine);
-
     gboolean is_release = (state & IBUS_RELEASE_MASK) != 0;
 
-    // Handle key release events (used for Ctrl+Shift chord detection)
+    /* Handle key release events (used for Ctrl+Shift chord detection) */
     if (is_release) {
         if (keyval == IBUS_KEY_Control_L || keyval == IBUS_KEY_Control_R ||
             keyval == IBUS_KEY_Shift_L || keyval == IBUS_KEY_Shift_R) {
 
-            // If both Ctrl and Shift were held down and no other key was pressed:
             if (vl_engine->ctrl_pressed && vl_engine->shift_pressed && !vl_engine->other_key_in_chord) {
                 if (vl_engine->toggle_mode == TOGGLE_CTRL_SHIFT || vl_engine->toggle_mode == TOGGLE_BOTH) {
                     ibus_lotus_toggle_vietnamese(vl_engine);
@@ -870,8 +1160,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
-    // Key Press Events:
-    // Update modifier trackers
+    /* Key Press Events: Update modifier trackers */
     if (keyval == IBUS_KEY_Control_L || keyval == IBUS_KEY_Control_R) {
         vl_engine->ctrl_pressed = TRUE;
         return FALSE;
@@ -881,12 +1170,19 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
-    // Mark chord corrupted if another key is pressed while holding Ctrl/Shift
     if (vl_engine->ctrl_pressed || vl_engine->shift_pressed) {
         vl_engine->other_key_in_chord = TRUE;
     }
 
-    // Password / PIN protection
+    /* If a pending grave (`) timer was waiting and user pressed another key:
+     * Flush the buffered grave (`) immediately so typing `code` in Markdown/Terminal works seamlessly! */
+    if (vl_engine->grave_timer_id != 0 && keyval != '`') {
+        ibus_lotus_cancel_grave_timer(vl_engine);
+        IBusText *grave_text = ibus_text_new_from_static_string("`");
+        ibus_engine_commit_text(engine, grave_text);
+    }
+
+    /* Password / PIN protection */
     if (vl_engine->is_password_field) {
         if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_engine_reset_internal(vl_engine);
@@ -894,13 +1190,13 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
-    // Pure modifier keys: CapsLock, ShiftLock, Level3
+    /* Pure modifier keys: CapsLock, ShiftLock, Level3 */
     if (keyval == IBUS_KEY_Caps_Lock || keyval == IBUS_KEY_Shift_Lock ||
         keyval == IBUS_KEY_ISO_Level3_Shift) {
         return FALSE;
     }
 
-    // Hotkey Alt + Z: Toggle VN/EN
+    /* Hotkey Alt + Z: Toggle VN/EN */
     if ((state & IBUS_MOD1_MASK) && (keyval == 'z' || keyval == 'Z')) {
         if (vl_engine->toggle_mode == TOGGLE_ALT_Z || vl_engine->toggle_mode == TOGGLE_BOTH) {
             ibus_lotus_toggle_vietnamese(vl_engine);
@@ -908,7 +1204,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         }
     }
 
-    // Hotkey Shift + Space: Toggle VN/EN
+    /* Hotkey Shift + Space: Toggle VN/EN */
     if ((state & IBUS_SHIFT_MASK) && (keyval == IBUS_KEY_space || keyval == ' ')) {
         if (vl_engine->toggle_mode == TOGGLE_SHIFT_SPACE) {
             ibus_lotus_toggle_vietnamese(vl_engine);
@@ -916,7 +1212,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         }
     }
 
-    // Pass through system hotkeys (Ctrl, Alt, Super/Win)
+    /* Pass through system hotkeys (Ctrl, Alt, Super/Win) */
     if (state & (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_SUPER_MASK)) {
         if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_commit_composing(vl_engine, NULL);
@@ -924,7 +1220,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
-    // Navigation & action keys: commit active word first
+    /* Navigation & action keys: commit active word first */
     if (keyval == IBUS_KEY_Return || keyval == IBUS_KEY_KP_Enter || keyval == IBUS_KEY_Linefeed ||
         keyval == IBUS_KEY_Tab || keyval == IBUS_KEY_ISO_Left_Tab || keyval == IBUS_KEY_KP_Tab ||
         keyval == IBUS_KEY_Delete || keyval == IBUS_KEY_KP_Delete ||
@@ -941,7 +1237,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
-    // Handle BackSpace
+    /* Handle BackSpace */
     if (keyval == IBUS_KEY_BackSpace) {
         if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_backspace_composing(vl_engine);
@@ -951,73 +1247,69 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
-    // Handle Grave Key ` to open Quick Menu (if enabled and not composing)
+    /* Handle Grave Key ` to open Quick Menu (with 220ms debounce so double-tap `` types ` without losing focus) */
     if (keyval == '`' && vl_engine->grave_menu_enabled && !lotuskey_is_composing(vl_engine->session)) {
-        gint64 now = get_current_time_ms();
-        if (now - vl_engine->last_grave_time_ms < 400) {
-            // Second press in rapid succession: pass literal ` to app
-            vl_engine->last_grave_time_ms = 0;
+        if (vl_engine->grave_timer_id != 0) {
+            /* Second press within 220ms: cancel menu launch and pass literal ` to app */
+            ibus_lotus_cancel_grave_timer(vl_engine);
             return FALSE;
         }
-        vl_engine->last_grave_time_ms = now;
-        ibus_lotus_spawn_tool("lotuskey-menu");
+        vl_engine->grave_timer_id = g_timeout_add(220, ibus_lotus_grave_timeout_cb, vl_engine);
         return TRUE;
     }
 
-    // If Vietnamese is disabled, pass all printable characters through directly (English passthrough)
+    /* If Vietnamese is disabled, pass all printable characters through directly (English passthrough) */
     if (!vl_engine->enabled) {
         return FALSE;
     }
 
-    // Handle Bracket transforms '[' -> 'ơ', ']' -> 'ư', '{' -> 'Ơ', '}' -> 'Ư'
-    if (vl_engine->bracket_transform && !vl_engine->is_vni) {
-        if (keyval == '[') {
-            if (lotuskey_is_composing(vl_engine->session)) {
-                ibus_lotus_commit_composing(vl_engine, NULL);
-            }
-            IBusText *commit_text = ibus_text_new_from_static_string("ơ");
-            ibus_engine_commit_text(engine, commit_text);
-            ibus_lotus_engine_reset_internal(vl_engine);
-            return TRUE;
-        } else if (keyval == ']') {
-            if (lotuskey_is_composing(vl_engine->session)) {
-                ibus_lotus_commit_composing(vl_engine, NULL);
-            }
-            IBusText *commit_text = ibus_text_new_from_static_string("ư");
-            ibus_engine_commit_text(engine, commit_text);
-            ibus_lotus_engine_reset_internal(vl_engine);
-            return TRUE;
-        } else if (keyval == '{') {
-            if (lotuskey_is_composing(vl_engine->session)) {
-                ibus_lotus_commit_composing(vl_engine, NULL);
-            }
-            IBusText *commit_text = ibus_text_new_from_static_string("Ơ");
-            ibus_engine_commit_text(engine, commit_text);
-            ibus_lotus_engine_reset_internal(vl_engine);
-            return TRUE;
-        } else if (keyval == '}') {
-            if (lotuskey_is_composing(vl_engine->session)) {
-                ibus_lotus_commit_composing(vl_engine, NULL);
-            }
-            IBusText *commit_text = ibus_text_new_from_static_string("Ư");
-            ibus_engine_commit_text(engine, commit_text);
-            ibus_lotus_engine_reset_internal(vl_engine);
+    /* Handle Bracket transforms '[' -> 'ơ', ']' -> 'ư', '{' -> 'Ơ', '}' -> 'Ư'
+     * Feeds 'ow' / 'uw' directly into the active syllable so h[n -> hơn, t]s -> tứ, [[ -> [ */
+    if (vl_engine->bracket_transform && !vl_engine->is_vni &&
+        (keyval == '[' || keyval == ']' || keyval == '{' || keyval == '}')) {
+        if (vl_engine->last_bracket_key == (char)keyval && lotuskey_is_composing(vl_engine->session)) {
+            /* Double bracket (e.g. [[ or ]]): revert the ơ/ư and commit literal bracket */
+            vl_engine->last_bracket_key = 0;
+            ibus_lotus_backspace_composing(vl_engine);
+            char trail[2] = { (char)keyval, '\0' };
+            ibus_lotus_commit_composing(vl_engine, trail);
             return TRUE;
         }
+        vl_engine->last_bracket_key = (char)keyval;
+        char base_vowel = (keyval == '[' || keyval == ']') ? ((keyval == '[') ? 'o' : 'u')
+                                                           : ((keyval == '{') ? 'O' : 'U');
+        char horn_key = (keyval == '[' || keyval == ']') ? 'w' : 'W';
+        lotuskey_feed_char(vl_engine->session, (uint32_t)base_vowel);
+        lotuskey_feed_char(vl_engine->session, (uint32_t)horn_key);
+        ibus_lotus_update_preedit(vl_engine);
+        return TRUE;
     }
+    vl_engine->last_bracket_key = 0;
 
-    // Handle W2U option: If w2u is disabled, typing 'w' or 'W' at start of word should NOT turn into 'ư'/'Ư'
+    /* Handle W2U option: If w2u is disabled, typing 'w' or 'W' at start of word should NOT turn into 'ư'/'Ư',
+     * while keeping 'w' inside the composing buffer so English words like "water"/"window" stay intact! */
     if (!vl_engine->w2u && !vl_engine->is_vni && (keyval == 'w' || keyval == 'W') && !lotuskey_is_composing(vl_engine->session)) {
-        char buf[2] = { (char)keyval, '\0' };
-        IBusText *commit_text = ibus_text_new_from_string(buf);
-        ibus_engine_commit_text(engine, commit_text);
+        lotuskey_feed_char(vl_engine->session, keyval);
+        lotuskey_feed_char(vl_engine->session, keyval);
+        ibus_lotus_update_preedit(vl_engine);
         return TRUE;
     }
 
-    // Handle printable ASCII characters (32..126)
+    /* Handle printable ASCII characters (32..126) */
     if (keyval >= 32 && keyval < 127) {
         gboolean is_alpha = (keyval >= 'a' && keyval <= 'z') || (keyval >= 'A' && keyval <= 'Z');
         gboolean is_digit = (keyval >= '0' && keyval <= '9');
+
+        /* Hybrid Telex + VNI support: translate digit keys when composing */
+        if (vl_engine->input_method == IM_TELEX_VNI && is_digit && lotuskey_is_composing(vl_engine->session)) {
+            char mapped_telex = ibus_lotus_translate_vni_digit_for_hybrid(vl_engine, keyval);
+            if (mapped_telex != 0) {
+                keyval = (guint)mapped_telex;
+                is_alpha = TRUE;
+                is_digit = FALSE;
+            }
+        }
+
         gboolean is_word_char = is_alpha || (vl_engine->is_vni && is_digit && lotuskey_is_composing(vl_engine->session));
 
         if (!is_word_char) {
@@ -1025,8 +1317,10 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
                 if (keyval == '(' || keyval == '[' || keyval == '{') {
                     lotuskey_feed_char(vl_engine->session, keyval);
                     const char *committed = lotuskey_get_last_text(vl_engine->session);
-                    char buf[1024];
-                    snprintf(buf, sizeof(buf), "%s%c", committed ? committed : "", (char)keyval);
+                    char converted[1024];
+                    lotus_convert_charset(committed ? committed : "", vl_engine->charset, converted, sizeof(converted));
+                    char buf[1028];
+                    snprintf(buf, sizeof(buf), "%s%c", converted, (char)keyval);
                     IBusText *commit_text = ibus_text_new_from_string(buf);
                     ibus_engine_commit_text(engine, commit_text);
                     ibus_lotus_engine_reset_internal(vl_engine);
@@ -1050,7 +1344,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             }
         }
 
-        // Telex stop-coda and tone corrections
+        /* Telex stop-coda and tone corrections */
         if (!vl_engine->is_vni && lotuskey_is_composing(vl_engine->session)) {
             char lower_key = vl_tolower((char)keyval);
             uint8_t key_tone = ibus_lotus_telex_tone_for_key(lower_key);
@@ -1124,10 +1418,10 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
 
         if (action == LOTUSKEY_ACTION_COMMIT) {
             const char *committed = lotuskey_get_last_text(vl_engine->session);
-            char buf[1024];
-            snprintf(buf, sizeof(buf), "%s", committed ? committed : "");
-            if (buf[0] != '\0') {
-                IBusText *commit_text = ibus_text_new_from_string(buf);
+            char converted[1024];
+            lotus_convert_charset(committed ? committed : "", vl_engine->charset, converted, sizeof(converted));
+            if (converted[0] != '\0') {
+                IBusText *commit_text = ibus_text_new_from_string(converted);
                 ibus_engine_commit_text(engine, commit_text);
             }
             ibus_lotus_engine_reset_internal(vl_engine);
@@ -1158,15 +1452,45 @@ static void ibus_lotus_engine_class_init(IBusLotusEngineClass *klass) {
     engine_class->disable = ibus_lotus_engine_disable;
     engine_class->focus_in = ibus_lotus_engine_focus_in;
     engine_class->focus_out = ibus_lotus_engine_focus_out;
+    engine_class->set_capabilities = ibus_lotus_engine_set_capabilities;
     engine_class->set_content_type = ibus_lotus_engine_set_content_type;
     engine_class->property_activate = ibus_lotus_engine_property_activate;
     engine_class->process_key_event = ibus_lotus_engine_process_key_event;
+}
+
+static void setup_config_monitors(void) {
+    gchar *dir_path = ibus_lotus_get_config_dir();
+    if (!dir_path) return;
+    g_mkdir_with_parents(dir_path, 0755);
+
+    gchar *env_path = g_build_filename(dir_path, "config.env", NULL);
+    GFile *env_file = g_file_new_for_path(env_path);
+    g_config_monitor = g_file_monitor_file(env_file, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (g_config_monitor) {
+        g_signal_connect(g_config_monitor, "changed", G_CALLBACK(on_config_file_changed), NULL);
+    }
+    g_object_unref(env_file);
+    g_free(env_path);
+
+    gchar *macro_path = g_build_filename(dir_path, "macros.conf", NULL);
+    GFile *macro_file = g_file_new_for_path(macro_path);
+    g_macro_monitor = g_file_monitor_file(macro_file, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (g_macro_monitor) {
+        g_signal_connect(g_macro_monitor, "changed", G_CALLBACK(on_config_file_changed), NULL);
+    }
+    g_object_unref(macro_file);
+    g_free(macro_path);
+
+    g_free(dir_path);
 }
 
 int main(int argc, char **argv) {
     static gboolean ibus = FALSE;
     GError *error = NULL;
     GOptionContext *context;
+
+    const char *dbg_env = getenv("LOTUSKEY_DEBUG");
+    g_debug_enabled = (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0));
 
     static const GOptionEntry entries[] = {
         { "ibus", 'i', 0, G_OPTION_ARG_NONE, &ibus, "Executed by ibus-daemon", NULL },
@@ -1184,7 +1508,9 @@ int main(int argc, char **argv) {
     g_option_context_free(context);
 
     ibus_init();
-    signal(SIGUSR1, sigusr1_handler);
+    ibus_lotus_reload_macros();
+    setup_config_monitors();
+    g_unix_signal_add(SIGUSR1, on_sigusr1_unix_signal, NULL);
 
     IBusBus *bus = ibus_bus_new();
     if (!ibus_bus_is_connected(bus)) {

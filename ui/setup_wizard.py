@@ -27,13 +27,26 @@ _SETUP_BIN    = "/usr/bin/lotuskey-setup" if _INSTALLED else os.path.join(BASE_D
 _MENU_BIN     = "/usr/bin/lotuskey-menu"  if _INSTALLED else os.path.join(BASE_DIR, "bin", "lotuskey-menu")
 _COMP_XML_SRC = "/usr/share/ibus/component/lotuskey.xml" if _INSTALLED else os.path.join(BASE_DIR, "engine", "lotus.xml")
 
-from config.config_manager import load_config, save_config, set_autostart, is_autostart_enabled
+from config.config_manager import load_config, save_config, load_macros, set_autostart, is_autostart_enabled
+from config.distro_adapter import DistroAdapter
+from config.im_framework import (
+    detect_installed_frameworks,
+    resolve_effective_framework,
+    generate_ibus_component_xml,
+    apply_framework_config,
+)
 
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
-gi.require_version('IBus', '1.0')
-from gi.repository import Gtk, Gdk, GLib, Pango, IBus
+from gi.repository import Gtk, Gdk, GLib, Pango
+try:
+    gi.require_version('IBus', '1.0')
+    from gi.repository import IBus
+    HAS_IBUS_GI = True
+except Exception:
+    IBus = None
+    HAS_IBUS_GI = False
 
 CSS_DATA = b"""
 window.wizard-window {
@@ -135,89 +148,92 @@ window.wizard-window {
 """
 
 def scan_system_environment():
-    """Scans system environment, tools, and prerequisites."""
+    """Scans system environment, tools, and prerequisites across any Linux distro."""
     results = []
-    
+    distro = DistroAdapter.detect_distro()
+
+    # 0. Linux Distribution & Architecture
+    results.append({
+        "id": "distro",
+        "name": "Bản phân phối Linux (OS & Kiến trúc)",
+        "value": f"{distro['name']} ({distro['arch']})",
+        "ok": True,
+        "detail": f"Họ distro: {str(distro['family']).upper()} | Trình quản lý gói: {distro['pkg_manager']}"
+    })
+
     # 1. Desktop Session & Display
     session_type = os.environ.get("XDG_SESSION_TYPE", "unknown").capitalize()
     is_wayland = "wayland" in session_type.lower()
     results.append({
         "id": "session",
         "name": "Môi trường hiển thị (Display Session)",
-        "value": f"{session_type} ({'Khuyên dùng GNOME Wayland' if is_wayland else 'X11'})",
+        "value": f"{session_type} ({'Wayland Native' if is_wayland else 'X11'})",
         "ok": True,
-        "detail": "Tương thích 100% với cơ chế Wayland Native của LotusKey."
+        "detail": "Tương thích với GNOME, KDE Plasma, Hyprland, Sway, Cinnamon, XFCE."
     })
-    
-    # 2. IBus Framework
-    ibus_path = shutil.which("ibus")
-    ibus_daemon = shutil.which("ibus-daemon")
-    ibus_ok = (ibus_path is not None)
+
+    # 2. Multi-Framework Input Method Engines (IBus / Fcitx5 / UInput)
+    fws = detect_installed_frameworks()
+    active_fw = resolve_effective_framework("auto").upper()
+    installed_names = [k.upper() for k, v in fws.items() if v.get("installed")]
     results.append({
-        "id": "ibus",
-        "name": "Hệ thống IBus Framework",
-        "value": "Đã sẵn sàng" if ibus_ok else "Chưa cài đặt",
-        "ok": ibus_ok,
-        "detail": f"Đường dẫn: {ibus_path or 'Không tìm thấy'}"
+        "id": "im_frameworks",
+        "name": "Hệ thống Bộ gõ Linux (Multi-Backend)",
+        "value": f"Đã cài: {', '.join(installed_names) or 'UInput'} (Tối ưu: {active_fw})",
+        "ok": len(installed_names) > 0,
+        "detail": "Hỗ trợ đồng thời IBus, Fcitx5, Fcitx4 và Evdev/UInput."
     })
-    
-    # 3. C Compiler (GCC)
-    gcc_path = shutil.which("gcc")
+
+    # 3. C/C++ Compiler Toolchain
+    gcc_path = shutil.which("gcc") or shutil.which("clang")
     gcc_ok = (gcc_path is not None)
     results.append({
         "id": "gcc",
-        "name": "Trình biên dịch C (GCC Toolchain)",
+        "name": "Trình biên dịch C/C++ (GCC / Clang)",
         "value": "Đã cài đặt" if gcc_ok else "Chưa cài đặt",
         "ok": gcc_ok,
-        "detail": f"Đường dẫn: {gcc_path or 'Không tìm thấy'}"
+        "detail": f"Đường dẫn: {gcc_path}" if gcc_ok else f"Gợi ý cài: {DistroAdapter.get_install_hint('build')}"
     })
-    
-    # 4. Native LotusKey Core Library
+
+    # 4. Native LotusKey Core Library (ABI check + Fallback Source support)
     so_path = os.path.join(_ENGINE_LIB, "libLotusKeyCAPI.so")
-    so_ok = os.path.exists(so_path)
+    abi_ok, abi_reason = DistroAdapter.check_capi_library_compatible(so_path)
+    has_fallback_src = os.path.exists(os.path.join(BASE_DIR, "src", "lotuskey_capi_fallback.cpp"))
+    so_ok = abi_ok or (has_fallback_src and shutil.which("g++") is not None)
     results.append({
         "id": "lotuskey_core",
-        "name": "Thư viện xử lý tiếng Việt (64-bit)",
-        "value": "Đã tích hợp" if so_ok else "Thiếu tệp thư viện",
+        "name": f"Thư viện xử lý tiếng Việt ({distro['arch']})",
+        "value": "Tương thích ABI" if abi_ok else ("Sẵn sàng biên dịch từ nguồn C++" if so_ok else "Không tương thích"),
         "ok": so_ok,
-        "detail": f"Kích thước: {os.path.getsize(so_path):,} bytes" if so_ok else "Không tìm thấy libLotusKeyCAPI.so"
+        "detail": f"Kích thước: {os.path.getsize(so_path):,} bytes" if abi_ok else f"Tự động build native cho {distro['arch']} ({abi_reason})"
     })
-    
-    # 5. GTK3 & Python GObject
+
+    # 5. GTK & Python GObject
     results.append({
         "id": "gtk",
-        "name": "Giao diện GTK+ 3.0 & Python GObject",
+        "name": "Giao diện GTK & Python GObject",
         "value": "Đã sẵn sàng",
         "ok": True,
         "detail": f"Phiên bản GTK: {Gtk.get_major_version()}.{Gtk.get_minor_version()}"
     })
-    
-    # 6. GSettings GNOME Input Sources
-    gsettings_path = shutil.which("gsettings")
-    results.append({
-        "id": "gsettings",
-        "name": "Quản lý nguồn gõ GNOME (GSettings)",
-        "value": "Đã sẵn sàng" if gsettings_path else "Thiếu gsettings",
-        "ok": gsettings_path is not None,
-        "detail": "Dùng để kích hoạt LotusKey lên thanh tác vụ GNOME."
-    })
-    
+
     return results
 
 def run_installation_step(step_idx, emit_log):
     """Executes a single installation step and returns True on success."""
     try:
         if step_idx == 1:
-            emit_log("Khởi tạo thư mục cấu hình LotusKey (~/.config/LotusKey)...")
+            emit_log("Khởi tạo thư mục cấu hình LotusKey (~/.config/LotusKey) & bộ Icon SVG...")
+            DistroAdapter.install_user_icons(BASE_DIR)
             cfg = load_config()
             cfg["autostart"] = True
             save_config(cfg)
-            emit_log("✓ Cấu hình ban đầu đã sẵn sàng.")
+            emit_log("✓ Cấu hình ban đầu và Icon hệ thống đã sẵn sàng.")
             return True
 
         elif step_idx == 2:
             if _INSTALLED:
-                # Deb mode: engine đã được cài bởi dpkg, chỉ verify
+                # Package mode: engine đã được cài bởi package manager, chỉ verify
                 emit_log("Kiểm tra Native C IBus Engine (đã cài từ package)...")
                 if os.path.isfile(_ENGINE_BIN) and os.access(_ENGINE_BIN, os.X_OK):
                     emit_log(f"✓ Engine sẵn sàng: {_ENGINE_BIN}")
@@ -226,23 +242,18 @@ def run_installation_step(step_idx, emit_log):
                     emit_log(f"✖ Không tìm thấy engine tại: {_ENGINE_BIN}")
                     return False
             else:
-                # Dev mode: compile từ source
-                emit_log("Biên dịch Native C IBus Engine (ibus-engine-lotuskey)...")
-                ibus_inc = os.path.join(BASE_DIR, ".ibus_dev", "usr", "include", "ibus-1.0")
-                if not os.path.isdir(ibus_inc):
-                    ibus_inc = "/tmp/ibus_dev/usr/include/ibus-1.0"
-                if not os.path.isdir(ibus_inc):
-                    ibus_inc = "/usr/include/ibus-1.0"
-                ibus_lib = os.path.join(BASE_DIR, ".ibus_dev", "usr", "lib", "x86_64-linux-gnu")
-                if not os.path.isfile(os.path.join(ibus_lib, "libibus-1.0.so")):
-                    ibus_lib = "/tmp/ibus_dev/usr/lib/x86_64-linux-gnu"
-                if not os.path.isfile(os.path.join(ibus_lib, "libibus-1.0.so")):
-                    ibus_lib = "/usr/lib/x86_64-linux-gnu"
+                # Dev / Universal Source mode: verify CAPI ABI first, then compile C engines
+                emit_log("Kiểm tra tương thích ABI của libLotusKeyCAPI.so...")
+                capi_ok, capi_msg = DistroAdapter.ensure_capi_library(BASE_DIR)
+                emit_log(f" -> {capi_msg}")
+                if not capi_ok:
+                    return False
 
                 src_file = _ENGINE_SRC
                 out_bin  = _ENGINE_BIN
                 lib_dir  = _ENGINE_LIB
                 inc_dir  = _ENGINE_INC
+                cc_bin   = shutil.which("gcc") or shutil.which("clang") or "cc"
 
                 so0_link = os.path.join(lib_dir, "libLotusKeyCAPI.so.0")
                 if not os.path.exists(so0_link):
@@ -251,24 +262,16 @@ def run_installation_step(step_idx, emit_log):
                     except Exception:
                         pass
 
-                pkg_cflags = subprocess.check_output(["pkg-config", "--cflags", "gobject-2.0", "glib-2.0", "gio-2.0"], text=True).split()
-                pkg_libs   = subprocess.check_output(["pkg-config", "--libs",   "gobject-2.0", "glib-2.0", "gio-2.0"], text=True).split()
-
+                emit_log("Biên dịch Native C IBus Engine (ibus-engine-lotuskey)...")
+                cflags, ldflags = DistroAdapter.get_ibus_build_flags(BASE_DIR)
                 cmd = [
-                    "gcc", "-O2",
-                    f"-I{ibus_inc}",
-                    f"-I{inc_dir}",
-                ] + pkg_cflags + [
+                    cc_bin, "-O2",
+                    *cflags,
                     src_file,
-                    f"-L{ibus_lib}",
-                    f"-L{lib_dir}",
                     "-Wl,-rpath,$ORIGIN",
                     "-Wl,-rpath,$ORIGIN/../lib",
-                    f"-Wl,-rpath,{lib_dir}",
                     "-Wl,-rpath,/usr/lib/lotuskey",
-                    "-libus-1.0",
-                ] + pkg_libs + [
-                    "-lLotusKeyCAPI",
+                    *ldflags,
                     "-o", out_bin
                 ]
                 emit_log(f"Chạy lệnh: {' '.join(cmd)}")
@@ -277,18 +280,34 @@ def run_installation_step(step_idx, emit_log):
                     if os.path.isfile(out_bin) and os.access(out_bin, os.X_OK):
                         emit_log(f"⚠ Bỏ qua biên dịch lại, dùng binary có sẵn: {out_bin}")
                     else:
-                        emit_log(f"Lỗi biên dịch: {res.stderr}")
-                        return False
-                legacy_bin = os.path.join(BASE_DIR, "bin", "ibus-engine-lotus")
-                if os.path.exists(legacy_bin) or os.path.islink(legacy_bin):
-                    os.remove(legacy_bin)
-                os.symlink("ibus-engine-lotuskey", legacy_bin)
-                os.chmod(out_bin, 0o755)
-                emit_log("✓ Biên dịch Native Engine thành công.")
+                        emit_log(f"⚠ Không thể biên dịch IBus engine ({res.stderr.strip()}), tiếp tục với UInput/Fcitx5.")
+
+                # Also compile lotuskey-uinput universal daemon
+                uinput_src = os.path.join(BASE_DIR, "src", "uinput_daemon.c")
+                uinput_bin = os.path.join(BASE_DIR, "bin", "lotuskey-uinput")
+                if os.path.isfile(uinput_src):
+                    cmd_uinput = [
+                        cc_bin, "-O2", f"-I{inc_dir}", uinput_src,
+                        f"-L{lib_dir}", "-Wl,-rpath,$ORIGIN", "-Wl,-rpath,$ORIGIN/../lib",
+                        f"-Wl,-rpath,{lib_dir}", "-Wl,-rpath,/usr/lib/lotuskey",
+                        "-lLotusKeyCAPI", "-o", uinput_bin
+                    ]
+                    subprocess.run(cmd_uinput, capture_output=True, text=True, check=False)
+                    if os.path.isfile(uinput_bin):
+                        os.chmod(uinput_bin, 0o755)
+
+                if os.path.isfile(out_bin):
+                    legacy_bin = os.path.join(BASE_DIR, "bin", "ibus-engine-lotus")
+                    if os.path.exists(legacy_bin) or os.path.islink(legacy_bin):
+                        os.remove(legacy_bin)
+                    os.symlink("ibus-engine-lotuskey", legacy_bin)
+                    os.chmod(out_bin, 0o755)
+
+                emit_log("✓ Biên dịch Native Engines (IBus & UInput) thành công.")
                 return True
 
         elif step_idx == 3:
-            emit_log("Cài đặt IBus Component XML & Registry Cache...")
+            emit_log("Cài đặt IBus Component XML, Fcitx5 Adapter & Registry Cache...")
             comp_dir = os.path.expanduser("~/.local/share/ibus/component")
             os.makedirs(comp_dir, exist_ok=True)
             dup_xml = os.path.join(comp_dir, "lotus.xml")
@@ -297,23 +316,22 @@ def run_installation_step(step_idx, emit_log):
                     os.remove(dup_xml)
                 except Exception:
                     pass
-            # Deb: XML đã ở /usr/share/ibus/component (system-wide), chỉ copy vào user dir để ibus user registry nhận
-            xml_src = _COMP_XML_SRC
-            if os.path.isfile(xml_src):
-                shutil.copy(xml_src, os.path.join(comp_dir, "lotuskey.xml"))
-            elif not _INSTALLED:
-                # Dev fallback
-                xml_src2 = os.path.join(BASE_DIR, "engine", "lotus.xml")
-                shutil.copy(xml_src2, os.path.join(comp_dir, "lotuskey.xml"))
+            xml_content = generate_ibus_component_xml(_ENGINE_BIN, _SETUP_BIN)
+            with open(os.path.join(comp_dir, "lotuskey.xml"), "w", encoding="utf-8") as f:
+                f.write(xml_content)
 
-            # Build IBus Registry Cache
-            reg = IBus.Registry.new()
-            reg.load()
-            reg.load_in_dir(comp_dir)
-            cache_path = os.path.expanduser("~/.cache/ibus/bus/registry")
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            reg.save_cache_file(cache_path)
-            emit_log("✓ Đã cập nhật IBus Component Descriptor & Registry Cache.")
+            # Build IBus Registry Cache (if gir1.2-ibus-1.0 is available)
+            if HAS_IBUS_GI and IBus is not None:
+                try:
+                    reg = IBus.Registry.new()
+                    reg.load()
+                    reg.load_in_dir(comp_dir)
+                    cache_path = os.path.expanduser("~/.cache/ibus/bus/registry")
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    reg.save_cache_file(cache_path)
+                except Exception as cache_err:
+                    emit_log(f"⚠ Bỏ qua tạo IBus cache: {cache_err}")
+            emit_log("✓ Đã cập nhật IBus Component Descriptor & Multi-Framework Config.")
             return True
 
         elif step_idx == 4:
@@ -348,16 +366,17 @@ def run_installation_step(step_idx, emit_log):
                 apps_dir = os.path.expanduser("~/.local/share/applications")
                 os.makedirs(apps_dir, exist_ok=True)
                 desktop_file = os.path.join(apps_dir, "lotuskey-setup.desktop")
+                icon_path = DistroAdapter.get_icon_path(active=True)
                 content = (
                     "[Desktop Entry]\n"
                     "Name=LotusKey - Bảng điều khiển\n"
                     "Comment=Bộ gõ tiếng Việt LotusKey Native Wayland (Tác giả: Victor Pham)\n"
                     f"Exec={setup_src}\n"
-                    "Icon=fcitx-lotus\n"
+                    f"Icon={icon_path}\n"
                     "Terminal=false\n"
                     "Type=Application\n"
                     "Categories=Settings;Utility;\n"
-                    "Keywords=lotus;lotuskey;vietnamese;telex;vni;ibus;\n"
+                    "Keywords=lotus;lotuskey;vietnamese;telex;vni;ibus;fcitx5;\n"
                 )
                 with open(desktop_file, "w", encoding="utf-8") as f:
                     f.write(content)
@@ -371,19 +390,15 @@ def run_installation_step(step_idx, emit_log):
             return True
 
         elif step_idx == 6:
-            emit_log("Tích hợp GNOME Input Sources & Kích hoạt bộ gõ...")
-            subprocess.run(
-                ["gsettings", "set", "org.gnome.desktop.input-sources", "sources", "[('ibus', 'lotuskey'), ('xkb', 'us')]"],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            subprocess.run(
-                ["gsettings", "set", "org.gnome.desktop.input-sources", "mru-sources", "[('ibus', 'lotuskey'), ('xkb', 'us')]"],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            subprocess.run(["ibus", "restart"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.0)
-            subprocess.run(["ibus", "engine", "lotuskey"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            emit_log("✓ Bộ gõ LotusKey đã được kích hoạt thành công trên GNOME Shell!")
+            emit_log("Đồng bộ Multi-Framework (IBus / Fcitx5 / UInput) & Kích hoạt bộ gõ...")
+            cfg = load_config()
+            macros = load_macros()
+            eff = apply_framework_config(cfg, macros, switch_daemon=False)
+            if eff == "ibus" and shutil.which("ibus"):
+                subprocess.run(["ibus", "restart"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(1.0)
+                subprocess.run(["ibus", "engine", "lotuskey"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            emit_log(f"✓ Bộ gõ LotusKey đã được kích hoạt thành công (Backend: {eff.upper()})!")
             return True
 
     except Exception as e:
