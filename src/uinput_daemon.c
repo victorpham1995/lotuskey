@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -179,17 +180,21 @@ static void emit_backspaces(int ufd, size_t count) {
 
 static void inject_utf8_text(const char *utf8_text) {
     if (!utf8_text || utf8_text[0] == '\0') return;
-    /* Use wtype on Wayland or xdotool on X11 for direct Unicode string injection */
-    const char *wayland_disp = getenv("WAYLAND_DISPLAY");
-    char cmd[2048];
-    if (wayland_disp && wayland_disp[0] != '\0') {
-        snprintf(cmd, sizeof(cmd), "wtype -- '%s' 2>/dev/null || xdotool type --clearmodifiers -- '%s' 2>/dev/null &",
-                 utf8_text, utf8_text);
-    } else {
-        snprintf(cmd, sizeof(cmd), "xdotool type --clearmodifiers -- '%s' 2>/dev/null &", utf8_text);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        const char *wayland_disp = getenv("WAYLAND_DISPLAY");
+        if (wayland_disp && wayland_disp[0] != '\0') {
+            execlp("wtype", "wtype", "--", utf8_text, (char *)NULL);
+        }
+        execlp("xdotool", "xdotool", "type", "--clearmodifiers", "--", utf8_text, (char *)NULL);
+        _exit(127);
     }
-    int rc = system(cmd);
-    (void)rc;
 }
 
 static char evdev_code_to_ascii(uint16_t code, bool shift, bool caps) {
@@ -299,6 +304,8 @@ static size_t utf8_cp_len(const char *s) {
 }
 
 int main(int argc, char **argv) {
+    prctl(PR_SET_DUMPABLE, 0);
+
     bool check_only = false;
     bool daemonize = false;
     for (int i = 1; i < argc; i++) {
@@ -347,6 +354,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_sig);
     signal(SIGTERM, handle_sig);
     signal(SIGUSR1, handle_sig);
+    signal(SIGCHLD, SIG_IGN);
 
     UInputEngineState st;
     memset(&st, 0, sizeof(st));

@@ -15,24 +15,12 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <stdarg.h>
 #include <signal.h>
 #include "lotuskey.h"
 #include "lotus_charset.h"
-
-static gboolean g_debug_enabled = FALSE;
-
-static void log_debug(const char *fmt, ...) {
-    if (G_LIKELY(!g_debug_enabled)) return;
-    FILE *fp = fopen("/tmp/ibus_lotus.log", "a");
-    if (!fp) return;
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(fp, fmt, args);
-    va_end(args);
-    fclose(fp);
-}
 
 #define IBUS_TYPE_LOTUS_ENGINE (ibus_lotus_engine_get_type())
 #ifndef IBUS_ATTR_UNDERLINE_NONE
@@ -77,6 +65,7 @@ struct _IBusLotusEngine {
     gboolean autostart;
     gchar *output_mode;
     gchar *im_framework;
+    gchar *ui_lang;
     gint charset;
     gint toggle_mode;
     guint client_caps;
@@ -477,6 +466,13 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
             vl_engine->charset = atoi(val_p);
         } else if (strncmp(line, "AUTOSTART=", 10) == 0) {
             vl_engine->autostart = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "UI_LANG=", 8) == 0) {
+            if (vl_engine->ui_lang) g_free(vl_engine->ui_lang);
+            if (strstr(line, "en") != NULL || strstr(line, "EN") != NULL) {
+                vl_engine->ui_lang = g_strdup("en");
+            } else {
+                vl_engine->ui_lang = g_strdup("vi");
+            }
         }
     }
     fclose(fp);
@@ -508,7 +504,8 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     if (!dir_path) {
         return;
     }
-    g_mkdir_with_parents(dir_path, 0755);
+    g_mkdir_with_parents(dir_path, 0700);
+    chmod(dir_path, 0700);
     gchar *path = g_build_filename(dir_path, "config.env", NULL);
 
     FILE *fp = fopen(path, "w");
@@ -527,6 +524,8 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     if (vl_engine->input_method == IM_VNI) im_str = "vni";
     else if (vl_engine->input_method == IM_TELEX_VNI) im_str = "telex_vni";
 
+    const char *lang_str = (vl_engine->ui_lang && strcmp(vl_engine->ui_lang, "en") == 0) ? "en" : "vi";
+
     fprintf(fp, "ENABLED=\"%s\"\n", vl_engine->enabled ? "true" : "false");
     fprintf(fp, "INPUT_METHOD=\"%s\"\n", im_str);
     fprintf(fp, "GRAMMAR_PROFILE=\"%s\"\n", vl_engine->sen_flex ? "sen_flex" : "classic");
@@ -543,7 +542,9 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     fprintf(fp, "IM_FRAMEWORK=\"%s\"\n", vl_engine->im_framework ? vl_engine->im_framework : "auto");
     fprintf(fp, "CHARSET=\"%d\"\n", vl_engine->charset);
     fprintf(fp, "AUTOSTART=\"%s\"\n", vl_engine->autostart ? "true" : "false");
+    fprintf(fp, "UI_LANG=\"%s\"\n", lang_str);
     fclose(fp);
+    chmod(path, 0600);
 
     struct stat st;
     if (stat(path, &st) == 0) {
@@ -571,9 +572,11 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
         fprintf(fp_json, "    \"mode_menu_key\": \"%s\",\n", vl_engine->grave_menu_enabled ? "grave" : "None");
         fprintf(fp_json, "    \"quick_telex\": %s,\n", vl_engine->quick_telex ? "true" : "false");
         fprintf(fp_json, "    \"preedit_underline\": %s,\n", vl_engine->preedit_underline ? "true" : "false");
-        fprintf(fp_json, "    \"autostart\": %s\n", vl_engine->autostart ? "true" : "false");
+        fprintf(fp_json, "    \"autostart\": %s,\n", vl_engine->autostart ? "true" : "false");
+        fprintf(fp_json, "    \"ui_lang\": \"%s\"\n", lang_str);
         fprintf(fp_json, "}\n");
         fclose(fp_json);
+        chmod(path_json, 0600);
     }
     g_free(path_json);
     g_free(dir_path);
@@ -588,39 +591,42 @@ static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
 
     IBusProperty *prop;
     IBusText *label;
+    gboolean is_en = (vl_engine->ui_lang && strcmp(vl_engine->ui_lang, "en") == 0);
 
     const char *im_label = "Telex";
     if (vl_engine->input_method == IM_VNI) im_label = "VNI";
     else if (vl_engine->input_method == IM_TELEX_VNI) im_label = "Telex+VNI";
 
-    char status_str[80];
-    snprintf(status_str, sizeof(status_str), "LotusKey: %s [%s]",
-             vl_engine->enabled ? "Tiếng Việt" : "English",
-             im_label);
+    const char *mode_label = is_en
+        ? (vl_engine->enabled ? "Vietnamese" : "English")
+        : (vl_engine->enabled ? "Tiếng Việt" : "Tiếng Anh");
+
+    char status_str[96];
+    snprintf(status_str, sizeof(status_str), "LotusKey: %s [%s]", mode_label, im_label);
 
     label = ibus_text_new_from_string(status_str);
     prop = ibus_property_new("lotus-status", PROP_TYPE_NORMAL, label, NULL, NULL,
                              TRUE, TRUE, PROP_STATE_UNCHECKED, NULL);
     ibus_prop_list_append(vl_engine->prop_list, prop);
 
-    label = ibus_text_new_from_static_string("Quick Menu (Phím `)...");
+    label = ibus_text_new_from_static_string(is_en ? "Quick Menu (` key)..." : "Menu nhanh (Phím `)...");
     prop = ibus_property_new("lotus-quick-menu", PROP_TYPE_NORMAL, label, NULL, NULL,
                              TRUE, TRUE, PROP_STATE_UNCHECKED, NULL);
     ibus_prop_list_append(vl_engine->prop_list, prop);
 
-    label = ibus_text_new_from_static_string("Bảng điều khiển LotusKey...");
+    label = ibus_text_new_from_static_string(is_en ? "LotusKey Settings..." : "Cài đặt LotusKey...");
     prop = ibus_property_new("lotus-setup", PROP_TYPE_NORMAL, label, "preferences-system", NULL,
                              TRUE, TRUE, PROP_STATE_UNCHECKED, NULL);
     ibus_prop_list_append(vl_engine->prop_list, prop);
 
-    label = ibus_text_new_from_static_string("Smart Bilingual (Song ngữ tự phục hồi)");
+    label = ibus_text_new_from_static_string(is_en ? "Auto-restore English words" : "Tự khôi phục từ tiếng Anh");
     prop = ibus_property_new("smart-bilingual", PROP_TYPE_TOGGLE, label, NULL, NULL,
                              TRUE, TRUE,
                              vl_engine->smart_bilingual ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED,
                              NULL);
     ibus_prop_list_append(vl_engine->prop_list, prop);
 
-    label = ibus_text_new_from_static_string("Modern Orthography (Bỏ dấu oà, uý)");
+    label = ibus_text_new_from_static_string(is_en ? "Modern tone placement (oà, uý)" : "Đặt dấu kiểu mới (oà, uý)");
     prop = ibus_property_new("modern-orthography", PROP_TYPE_TOGGLE, label, NULL, NULL,
                              TRUE, TRUE,
                              vl_engine->modern_orthography ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED,
@@ -630,7 +636,6 @@ static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
 
 static void ibus_lotus_toggle_vietnamese(IBusLotusEngine *vl_engine) {
     vl_engine->enabled = !vl_engine->enabled;
-    log_debug(">>> TOGGLED: enabled=%d\n", vl_engine->enabled);
     if (!vl_engine->enabled && lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     }
@@ -648,22 +653,23 @@ static void ibus_lotus_toggle_vietnamese(IBusLotusEngine *vl_engine) {
         );
     }
     const char *fallback_icon = vl_engine->enabled
-        ? "/usr/share/icons/hicolor/scalable/apps/fcitx-lotus.svg"
-        : "/usr/share/icons/hicolor/scalable/apps/fcitx-lotus-off.svg";
+        ? "/usr/share/icons/hicolor/scalable/apps/lotuskey.svg"
+        : "/usr/share/icons/hicolor/scalable/apps/lotuskey-off.svg";
     const char *icon_to_use = (custom_icon && g_file_test(custom_icon, G_FILE_TEST_EXISTS))
         ? custom_icon
         : (g_file_test(fallback_icon, G_FILE_TEST_EXISTS) ? fallback_icon : "input-keyboard");
 
+    gboolean is_en = (vl_engine->ui_lang && strcmp(vl_engine->ui_lang, "en") == 0);
     if (vl_engine->enabled) {
         ibus_lotus_send_notification(
             "LotusKey",
-            "🇻🇳 Chế độ Tiếng Việt (ON)",
+            is_en ? "Vietnamese input enabled" : "Đã bật gõ tiếng Việt",
             icon_to_use
         );
     } else {
         ibus_lotus_send_notification(
             "LotusKey",
-            "🇬🇧 Chế độ Tiếng Anh / English (OFF)",
+            is_en ? "English mode (direct input)" : "Chế độ tiếng Anh (tắt bộ gõ)",
             icon_to_use
         );
     }
@@ -932,6 +938,7 @@ static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
     vl_engine->autostart = TRUE;
     vl_engine->output_mode = g_strdup("preedit");
     vl_engine->im_framework = g_strdup("auto");
+    vl_engine->ui_lang = g_strdup("vi");
     vl_engine->charset = 0;
     vl_engine->toggle_mode = TOGGLE_BOTH;
     vl_engine->client_caps = 0;
@@ -961,6 +968,10 @@ static void ibus_lotus_engine_finalize(GObject *object) {
     if (vl_engine->im_framework) {
         g_free(vl_engine->im_framework);
         vl_engine->im_framework = NULL;
+    }
+    if (vl_engine->ui_lang) {
+        g_free(vl_engine->ui_lang);
+        vl_engine->ui_lang = NULL;
     }
     if (vl_engine->prop_list) {
         g_object_unref(vl_engine->prop_list);
@@ -1069,6 +1080,16 @@ static void ibus_lotus_engine_set_content_type(IBusEngine *engine, guint purpose
     }
 }
 
+static gboolean ibus_lotus_try_spawn_verified(const char *candidate) {
+    struct stat st;
+    if (stat(candidate, &st) != 0) return FALSE;
+    if (!S_ISREG(st.st_mode)) return FALSE;
+    if (st.st_uid != getuid() && st.st_uid != 0) return FALSE;
+    if (!g_file_test(candidate, G_FILE_TEST_IS_EXECUTABLE)) return FALSE;
+    gchar *argv[] = { (gchar *)candidate, NULL };
+    return g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL);
+}
+
 static void ibus_lotus_spawn_tool(const char *tool_name) {
     char self_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
@@ -1077,8 +1098,7 @@ static void ibus_lotus_spawn_tool(const char *tool_name) {
         gchar *bin_dir = g_path_get_dirname(self_path);
         gchar *sibling = g_build_filename(bin_dir, tool_name, NULL);
         g_free(bin_dir);
-        if (g_file_test(sibling, G_FILE_TEST_IS_EXECUTABLE)) {
-            g_spawn_command_line_async(sibling, NULL);
+        if (ibus_lotus_try_spawn_verified(sibling)) {
             g_free(sibling);
             return;
         }
@@ -1088,8 +1108,7 @@ static void ibus_lotus_spawn_tool(const char *tool_name) {
     const gchar *home = g_get_home_dir();
     if (home) {
         gchar *local_bin = g_build_filename(home, ".local", "bin", tool_name, NULL);
-        if (g_file_test(local_bin, G_FILE_TEST_IS_EXECUTABLE)) {
-            g_spawn_command_line_async(local_bin, NULL);
+        if (ibus_lotus_try_spawn_verified(local_bin)) {
             g_free(local_bin);
             return;
         }
@@ -1097,14 +1116,11 @@ static void ibus_lotus_spawn_tool(const char *tool_name) {
     }
 
     gchar *usr_bin = g_build_filename("/usr/bin", tool_name, NULL);
-    if (g_file_test(usr_bin, G_FILE_TEST_IS_EXECUTABLE)) {
-        g_spawn_command_line_async(usr_bin, NULL);
+    if (ibus_lotus_try_spawn_verified(usr_bin)) {
         g_free(usr_bin);
         return;
     }
     g_free(usr_bin);
-
-    g_spawn_command_line_async(tool_name, NULL);
 }
 
 static void ibus_lotus_engine_property_activate(IBusEngine *engine, const gchar *prop_name, guint prop_state) {
@@ -1461,7 +1477,8 @@ static void ibus_lotus_engine_class_init(IBusLotusEngineClass *klass) {
 static void setup_config_monitors(void) {
     gchar *dir_path = ibus_lotus_get_config_dir();
     if (!dir_path) return;
-    g_mkdir_with_parents(dir_path, 0755);
+    g_mkdir_with_parents(dir_path, 0700);
+    chmod(dir_path, 0700);
 
     gchar *env_path = g_build_filename(dir_path, "config.env", NULL);
     GFile *env_file = g_file_new_for_path(env_path);
@@ -1485,12 +1502,11 @@ static void setup_config_monitors(void) {
 }
 
 int main(int argc, char **argv) {
+    prctl(PR_SET_DUMPABLE, 0);
+
     static gboolean ibus = FALSE;
     GError *error = NULL;
     GOptionContext *context;
-
-    const char *dbg_env = getenv("LOTUSKEY_DEBUG");
-    g_debug_enabled = (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0));
 
     static const GOptionEntry entries[] = {
         { "ibus", 'i', 0, G_OPTION_ARG_NONE, &ibus, "Executed by ibus-daemon", NULL },

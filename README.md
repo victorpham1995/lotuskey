@@ -1,93 +1,90 @@
-# 🪷 LotusKey: Bộ Gõ Tiếng Việt Đa Nền Tảng Cho Linux (IBus • Fcitx5 • Fcitx4 • UInput)
+# LotusKey
 
-Bộ gõ tiếng Việt thế hệ mới cho Linux (**Wayland & X11**), tối ưu hóa hiệu năng với kiến trúc đa Backend:
-1. **Lõi C-ABI siêu tốc (`libLotusKeyCAPI`)** với cơ chế **Atomic Trail Commit** triệt tiêu hoàn toàn hiện tượng nuốt chữ/mất ký tự trên Electron/Chromium (VS Code, Antigravity IDE, Chrome, Slack).
-2. **Multi-Framework Linux Adapter** tự động thích ứng với mọi môi trường Desktop và Window Manager:
-   - **IBus Native Engine (`ibus-engine-lotuskey`)**: Mặc định tối ưu cho GNOME, Ubuntu, Fedora, Cinnamon, MATE, Budgie.
-   - **Fcitx5 Adapter (`fcitx5` + `lotus`)**: Đồng bộ cấu hình & Macro trực tiếp cho KDE Plasma, Hyprland, Sway, Cosmic, LXQt, XFCE.
-   - **Fcitx4 Legacy Adapter (`fcitx`)**: Tương thích ngược cho XFCE / Linux Mint cổ điển.
-   - **Evdev / UInput Universal Daemon (`lotuskey-uinput`)**: Daemon C chạy trực tiếp ở tầng nhân (`/dev/input` $\rightarrow$ `/dev/uinput`) cho mọi Window Manager (i3wm, bspwm, dwm, Sway, Hyprland) không cần qua IM module của GTK/Qt.
-3. **Zero-Syscall Keystroke Path**: Sử dụng `GFileMonitor` (inotify) và `g_unix_signal_add(SIGUSR1)` trên GLib MainLoop cùng thông báo D-Bus trực tiếp (`org.freedesktop.Notifications`), đạt **0 syscall I/O trên đường truyền phím**.
+Bộ gõ tiếng Việt cho Linux (Wayland & X11), hỗ trợ giao diện song ngữ Việt / Anh và tương thích đa nền tảng bộ gõ (**IBus**, **Fcitx5**, **Fcitx4**, **Evdev/UInput**).
+
+Vietnamese input method for Linux (Wayland & X11) with bilingual UI (Vietnamese / English) and multi-framework support (**IBus**, **Fcitx5**, **Fcitx4**, **Evdev/UInput**).
 
 ---
 
-## 🚀 Các Tính Năng Nổi Bật
+## Tính năng chính / Key Features
 
-| Tính năng | Mô tả chi tiết |
-| :--- | :--- |
-| **Đa Hệ Thống Bộ Gõ (Multi-Backend)** | Tự động nhận diện hoặc chuyển đổi 1 chạm giữa **Auto**, **IBus**, **Fcitx5**, **Fcitx4**, và **UInput Daemon**. |
-| **Không bao giờ mất chữ trên Wayland** | Cơ chế **Atomic Trail Commit** + tự động fallback từ Surrounding Text về Pre-edit khi ứng dụng (Electron/Chromium) không hỗ trợ Surrounding Text. |
-| **Telex, VNI & Hybrid (Telex + VNI)** | Hỗ trợ gõ thuần Telex, thuần VNI, hoặc gõ kết hợp cả hai (**Telex + VNI**) cùng lúc. |
-| **Hỗ trợ đầy đủ Bảng mã** | Xuất trực tiếp **Unicode (UTF-8 dựng sẵn)**, **Unicode Tổ hợp (NFD)**, **TCVN3 (ABC)** và **VNI Windows**. |
-| **Bảng Gõ Tắt (Macro Expansion)** | Quản lý từ viết tắt trực quan trong Bảng điều khiển, tự động khớp chữ hoa/thường (`vn` $\rightarrow$ `Việt Nam`, `VN` $\rightarrow$ `VIỆT NAM`). |
-| **Gõ nhanh `[` $\rightarrow$ `ơ`, `]` $\rightarrow$ `ư`** | Tích hợp trực tiếp vào âm tiết đang gõ (`h[n` $\rightarrow$ `hơn`, `t]s` $\rightarrow$ `tứ`, gõ đúp `[[` $\rightarrow$ `[`). |
-| **Quick Menu phím `` ` `` thông minh** | Bấm đơn phím `` ` `` mở nhanh Floating Quick Menu; bấm đúp `` `` `` hoặc gõ liền `` `code` `` giữ nguyên ký tự `` ` `` mà không làm mất focus cửa sổ. |
+- **Đa hệ thống bộ gõ (Multi-Backend)**:
+  - **IBus (`ibus-engine-lotuskey`)**: Engine C chạy trực tiếp trên GNOME, Ubuntu, Fedora, Cinnamon, MATE, Budgie.
+  - **Fcitx5 (`fcitx5`)**: Đồng bộ cấu hình và bảng gõ tắt cho KDE Plasma, Hyprland, Sway, Cosmic, LXQt.
+  - **Fcitx4 (`fcitx`)**: Hỗ trợ XFCE và các bản phân phối truyền thống.
+  - **UInput Daemon (`lotuskey-uinput`)**: Daemon cấp nhân (`/dev/input` -> `/dev/uinput`) cho các Window Manager độc lập (i3wm, bspwm, dwm, Sway, Hyprland).
+- **Kiểu gõ & Bảng mã (Input Methods & Charsets)**:
+  - Hỗ trợ **Telex**, **VNI** và **Telex + VNI** kết hợp.
+  - Xuất văn bản theo bảng mã **Unicode (UTF-8 dựng sẵn)**, **Unicode tổ hợp (NFD)**, **TCVN3 (ABC)** và **VNI Windows**.
+- **Xử lý gõ ổn định trên Wayland/Electron**:
+  - Chế độ **Pre-edit** chống mất chữ trên Chromium, VS Code, Electron.
+  - Tự động chuyển về Pre-edit khi ứng dụng không hỗ trợ Surrounding Text.
+- **Tiện ích gõ nhanh**:
+  - Bảng gõ tắt (Macro) tự khớp chữ hoa/thường (`vn` -> `Việt Nam`, `VN` -> `VIỆT NAM`).
+  - Gõ nhanh phụ âm (`cc=ch`, `gg=gi`, `kk=kh`, `nn=ng`, `qq=qu`, `pp=ph`, `tt=th`), `w -> ư`, `[ ] -> ơ ư`.
+  - Menu nhanh (phím `` ` ``) có độ trễ chống nhiễu 220ms: bấm đơn mở menu, bấm đúp `` `` `` hoặc gõ liền `` `code` `` giữ nguyên ký tự.
+- **Giao diện song ngữ (`Tiếng Việt` / `English`)**:
+  - Chuyển đổi trực tiếp ngôn ngữ hiển thị trong Cài đặt, Menu nhanh và Trình cài đặt.
 
 ---
 
-## 🛠️ Cài Đặt & Biên Dịch Tự Động
+## Cài đặt / Installation
 
-Chỉ cần chạy tập lệnh cài đặt:
+### 1. Cài đặt tự động từ mã nguồn / Build & Install
 ```bash
 ./install.sh
 ```
-Hoặc khởi chạy trình cài đặt đồ họa (Setup Wizard):
+
+Khởi chạy trình cài đặt đồ họa (Setup Wizard):
 ```bash
 ./setup.sh
 ```
-Để cấp quyền `/dev/uinput` không cần `root` cho chế độ **Evdev/UInput Universal Daemon**:
+
+Cấp quyền `/dev/uinput` cho chế độ UInput Daemon (tùy chọn):
 ```bash
 ./install.sh --setup-udev
 ```
 
-Tập lệnh sẽ tự động:
-- Nhận diện bản phân phối Linux (**Ubuntu/Debian/Mint**, **Fedora/RHEL/Nobara**, **Arch/Manjaro/CachyOS**, **openSUSE**, **Alpine/Void musl**, **NixOS/Silverblue**) và kiến trúc CPU (`x86_64`, `aarch64`, `riscv64`).
-- Kiểm tra tương thích ABI của [`libLotusKeyCAPI.so`](lib/libLotusKeyCAPI.so); nếu hệ thống dùng `GLIBC < 2.38`, `musl` hoặc `ARM64`, tự động biên dịch lại `libLotusKeyCAPI.so` từ mã nguồn C++20 ([`src/lotuskey_capi_fallback.cpp`](src/lotuskey_capi_fallback.cpp) + `core/*.cpp`).
-- Biên dịch Native C IBus Engine ([`src/main.c`](src/main.c)) với cơ chế fallback header [`include/ibus_fallback/ibus.h`](include/ibus_fallback/ibus.h) (không bắt buộc cài `libibus-1.0-dev` / `ibus-devel`) và Universal UInput Daemon ([`src/uinput_daemon.c`](src/uinput_daemon.c)).
-- Cài đặt bộ Icon SVG độc lập ([`assets/lotuskey.svg`](assets/lotuskey.svg), [`assets/lotuskey-off.svg`](assets/lotuskey-off.svg)), tạo động `lotuskey.xml` và đồng bộ sang Fcitx5 (`lotus.conf` & `bamboo.conf`).
-
-### 📦 Đóng gói Native Package cho các Distro
-- **Debian / Ubuntu / Mint (`.deb`)**: `./packaging/build_deb.sh`
-- **Arch Linux / Manjaro / CachyOS (`PKGBUILD`)**: `cd packaging && makepkg -si`
-- **Fedora / RHEL / openSUSE (`.rpm`)**: Dùng [`packaging/ibus-lotuskey.spec`](packaging/ibus-lotuskey.spec) với `rpmbuild`
-
----
-
-## ⌨️ Phím Tắt & Thao Tác Nhanh
-
-- **Bật / Tắt Tiếng Việt:**
-  - `Ctrl + Shift` (chuẩn Unikey).
-  - Hoặc `Alt + Z` / `Shift + Space`.
-- **Mở Quick Menu Dialog:**
-  - Bấm phím `` ` `` (grave key). Bấm đúp `` `` `` để gõ dấu backtick.
-- **Mở Bảng điều khiển (Control Panel & Macro Editor):**
-  - Chạy lệnh `lotuskey` hoặc `lotuskey-setup` trong Terminal, hoặc mở ứng dụng **"LotusKey - Bảng điều khiển"** từ App Grid.
+### 2. Đóng gói theo bản phân phối / Native Packaging
+- **Debian / Ubuntu / Linux Mint (`.deb`)**:
+  ```bash
+  ./packaging/build_deb.sh
+  sudo dpkg -i ibus-lotuskey_2.2.0_amd64.deb
+  ```
+- **Arch Linux / Manjaro / CachyOS (`PKGBUILD`)**:
+  ```bash
+  cd packaging && makepkg -si
+  ```
+- **Fedora / RHEL / openSUSE (`.rpm`)**:
+  Sử dụng [`packaging/ibus-lotuskey.spec`](packaging/ibus-lotuskey.spec) với `rpmbuild`.
 
 ---
 
-## 📂 Cấu Trúc Mã Nguồn
+## Phím tắt / Shortcuts
+
+- **Chuyển chế độ Việt / Anh**: `Ctrl + Shift`, `Alt + Z`, hoặc `Shift + Space` (tùy chọn trong cài đặt).
+- **Mở Menu nhanh**: Phím `` ` `` (bấm đúp `` `` `` để nhập dấu backtick).
+- **Mở Cài đặt**: Chạy lệnh `lotuskey` hoặc `lotuskey-setup`, hoặc mở từ danh sách ứng dụng.
+
+---
+
+## Cấu trúc thư mục / Directory Layout
 
 ```
-ibus-LotusKey/
-├── bin/
-│   ├── ibus-engine-lotuskey     # Binary thực thi native C chạy dưới IBus Daemon
-│   ├── lotuskey-uinput          # Binary thực thi Evdev/UInput Universal Daemon
-│   ├── lotuskey-menu            # Launcher mở Floating Quick Menu
-│   └── lotuskey-setup           # Launcher mở Bảng điều khiển & Trình sửa Gõ tắt
-├── src/
-│   ├── main.c                   # Mã nguồn C IBus Engine
-│   └── uinput_daemon.c          # Mã nguồn C Evdev/UInput Daemon
-├── include/
-│   ├── lotuskey.h               # Header C-ABI lõi xử lý tiếng Việt
-│   └── lotus_charset.h          # Bộ chuyển đổi Bảng mã (NFD/TCVN3/VNI) & Macro Table
-├── lib/
-│   └── libLotusKeyCAPI.so       # Thư viện C-ABI xử lý gõ tiếng Việt siêu tốc
-├── config/
-│   ├── config_manager.py        # Quản lý cấu hình JSON, config.env & macros.conf
-│   └── im_framework.py          # Multi-Framework Adapter (IBus / Fcitx5 / Fcitx4 / UInput)
-├── ui/
-│   ├── quick_menu.py            # Cửa sổ nổi hiện đại (mở khi bấm phím `)
-│   ├── setup_panel.py           # Bảng điều khiển & Quản lý Gõ tắt (GTK3)
-│   └── setup_wizard.py          # Trình cài đặt đồ họa Setup Wizard
-└── install.sh                   # Script biên dịch, cài đặt & đồng bộ đa bộ gõ
+lotuskey/
+├── assets/                  # Biểu tượng trạng thái SVG (lotuskey.svg, lotuskey-off.svg)
+├── bin/                     # Tệp thực thi (ibus-engine-lotuskey, lotuskey-uinput, launchers)
+├── config/                  # Quản lý cấu hình, ngôn ngữ (i18n), nhận diện distro & IM backend
+├── include/                 # Header C-ABI (lotuskey.h, lotus_charset.h) & IBus fallback header
+├── lib/                     # Thư viện lõi C-ABI (libLotusKeyCAPI.so)
+├── packaging/               # Kịch bản đóng gói (.deb, PKGBUILD, RPM spec)
+├── src/                     # Mã nguồn C cho IBus Engine và UInput Daemon
+├── ui/                      # Giao diện GTK (setup_panel.py, quick_menu.py, setup_wizard.py)
+└── install.sh               # Kịch bản biên dịch và cài đặt
 ```
+
+---
+
+## Giấy phép / License
+
+MIT License — Tác giả: Victor Pham.

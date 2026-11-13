@@ -6,7 +6,7 @@
 <component>
     <name>org.freedesktop.IBus.LotusKey</name>
     <description>LotusKey Vietnamese Input Method Engine</description>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
     <author>Victor Pham</author>
     <homepage>https://github.com/victorpham1995/lotuskey</homepage>
     <license>MIT</license>
@@ -26,7 +26,7 @@
             <icon>/usr/share/icons/hicolor/scalable/apps/lotuskey.svg</icon>
             <layout>us</layout>
             <rank>99</rank>
-            <symbol>🇻🇳</symbol>
+            <symbol>VI</symbol>
             <setup>/usr/bin/lotuskey-setup</setup>
         </engine>
         <engine>
@@ -39,7 +39,7 @@
             <icon>/usr/share/icons/hicolor/scalable/apps/lotuskey.svg</icon>
             <layout>us</layout>
             <rank>98</rank>
-            <symbol>🇻🇳</symbol>
+            <symbol>VI</symbol>
             <setup>/usr/bin/lotuskey-setup</setup>
         </engine>
         <engine>
@@ -52,7 +52,7 @@
             <icon>/usr/share/icons/hicolor/scalable/apps/lotuskey.svg</icon>
             <layout>us</layout>
             <rank>97</rank>
-            <symbol>🇻🇳</symbol>
+            <symbol>VI</symbol>
             <setup>/usr/bin/lotuskey-setup</setup>
         </engine>
         <engine>
@@ -65,7 +65,7 @@
             <icon>/usr/share/icons/hicolor/scalable/apps/lotuskey.svg</icon>
             <layout>us</layout>
             <rank>96</rank>
-            <symbol>🇻🇳</symbol>
+            <symbol>VI</symbol>
             <setup>/usr/bin/lotuskey-setup</setup>
         </engine>
     </engines>

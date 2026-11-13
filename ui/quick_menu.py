@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Quick Menu Dialog for LotusKey Vietnamese Input Method.
-Triggered by pressing ` (grave) or via status bar / shortcut.
-Compact, modern floating dialog for Linux (IBus / Fcitx5 / UInput).
+LotusKey - Quick Menu Dialog
+Floating dialog triggered by pressing ` (grave) or via shortcut.
+Supports Vietnamese and English UI.
 """
 
-import sys
 import os
+import sys
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from config.config_manager import load_config, save_config
-from config.im_framework import resolve_effective_framework, apply_framework_config
+from config.i18n import normalize_lang, tr
+from config.im_framework import apply_framework_config, resolve_effective_framework
 
 import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('Gdk', '3.0')
-from gi.repository import Gtk, Gdk
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk
 
 CSS_DATA = b"""
 window.quick-dialog {
     background-color: #1a1b26;
     border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 16px;
+    border-radius: 14px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
@@ -57,7 +58,6 @@ button.mode-btn {
     padding: 5px 12px;
     font-size: 12px;
     font-weight: 500;
-    transition: all 150ms ease-in-out;
 }
 
 button.mode-btn:hover {
@@ -70,6 +70,16 @@ button.mode-btn.active {
     color: #1a1b26;
     font-weight: 700;
     border-color: #7aa2f7;
+}
+
+button.lang-btn {
+    background: #24283b;
+    color: #c0caf5;
+    border: 1px solid #414868;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
 }
 
 checkbutton {
@@ -98,8 +108,9 @@ class QuickMenuDialog(Gtk.Window):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.on_config_changed = on_config_changed
         self.cfg = load_config()
+        self.lang = normalize_lang(self.cfg.get("ui_lang", "vi"))
 
-        self.set_title("Bộ Gõ LotusKey")
+        self.set_title(tr(self.lang, "quick_menu_title"))
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_resizable(False)
         self.set_decorated(False)
@@ -115,34 +126,52 @@ class QuickMenuDialog(Gtk.Window):
         )
         self.get_style_context().add_class("quick-dialog")
 
+        self.root_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(self.root_box)
+        self._build_content()
+
+        self.connect("key-press-event", self._on_key_press)
+        self.connect("focus-out-event", self._on_focus_out)
+
+    def _build_content(self):
+        for child in self.root_box.get_children():
+            self.root_box.remove(child)
+
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         main_box.set_margin_top(16)
         main_box.set_margin_bottom(16)
         main_box.set_margin_start(20)
         main_box.set_margin_end(20)
-        self.add(main_box)
+        self.root_box.pack_start(main_box, True, True, 0)
 
-        # Header with Lotus icon and Switch
         eff_fw = resolve_effective_framework(self.cfg.get("im_framework", "auto")).upper()
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        lbl_title = Gtk.Label(label="🪷 LotusKey", xalign=0)
+        lbl_title = Gtk.Label(label="LotusKey", xalign=0)
         lbl_title.get_style_context().add_class("lotus-title")
-        self.lbl_sub = Gtk.Label(label=f"Quick Menu • Backend: {eff_fw} • Tác giả: Victor Pham", xalign=0)
+        self.lbl_sub = Gtk.Label(label=f"{eff_fw}", xalign=0)
         self.lbl_sub.get_style_context().add_class("lotus-subtitle")
         title_box.pack_start(lbl_title, False, False, 0)
         title_box.pack_start(self.lbl_sub, False, False, 0)
         header_box.pack_start(title_box, True, True, 0)
 
+        btn_lang = Gtk.Button(label="EN" if self.lang == "vi" else "VI")
+        btn_lang.get_style_context().add_class("lang-btn")
+        btn_lang.set_valign(Gtk.Align.START)
+        btn_lang.connect("clicked", self._on_toggle_lang)
+
         btn_close = Gtk.Button(label="✕")
         btn_close.set_relief(Gtk.ReliefStyle.NONE)
+        btn_close.set_valign(Gtk.Align.START)
         btn_close.connect("clicked", lambda w: self.close())
+
         header_box.pack_end(btn_close, False, False, 0)
+        header_box.pack_end(btn_lang, False, False, 0)
         main_box.pack_start(header_box, False, False, 0)
 
-        # Vietnamese Enable Switch
+        # Enable Switch
         switch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        lbl_enable = Gtk.Label(label="Tiếng Việt (Ctrl+Shift / Alt+Z):", xalign=0)
+        lbl_enable = Gtk.Label(label=f"{tr(self.lang, 'qm_enable_vn')}:", xalign=0)
         lbl_enable.set_hexpand(True)
         self.sw_enable = Gtk.Switch()
         self.sw_enable.set_active(self.cfg.get("enabled", True))
@@ -151,21 +180,21 @@ class QuickMenuDialog(Gtk.Window):
         switch_box.pack_end(self.sw_enable, False, False, 0)
         main_box.pack_start(switch_box, False, False, 4)
 
-        # Input Method section (Telex / VNI / Telex+VNI)
-        lbl_im = Gtk.Label(label="Kiểu gõ:", xalign=0)
+        # Input Method
+        lbl_im = Gtk.Label(label=f"{tr(self.lang, 'qm_input_method')}:", xalign=0)
         lbl_im.get_style_context().add_class("section-label")
         main_box.pack_start(lbl_im, False, False, 0)
 
         im_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.btn_telex = Gtk.Button(label="Telex")
+        self.btn_telex = Gtk.Button(label=tr(self.lang, "im_telex"))
         self.btn_telex.get_style_context().add_class("mode-btn")
         self.btn_telex.connect("clicked", lambda w: self._set_im(0))
 
-        self.btn_vni = Gtk.Button(label="VNI")
+        self.btn_vni = Gtk.Button(label=tr(self.lang, "im_vni"))
         self.btn_vni.get_style_context().add_class("mode-btn")
         self.btn_vni.connect("clicked", lambda w: self._set_im(1))
 
-        self.btn_telex_vni = Gtk.Button(label="Telex + VNI")
+        self.btn_telex_vni = Gtk.Button(label=tr(self.lang, "im_telex_vni"))
         self.btn_telex_vni.get_style_context().add_class("mode-btn")
         self.btn_telex_vni.connect("clicked", lambda w: self._set_im(2))
 
@@ -174,13 +203,13 @@ class QuickMenuDialog(Gtk.Window):
         im_box.pack_start(self.btn_telex_vni, True, True, 0)
         main_box.pack_start(im_box, False, False, 2)
 
-        # Linux IM Framework Adapter section
-        lbl_fw = Gtk.Label(label="Hệ thống bộ gõ Linux (Multi-Backend):", xalign=0)
+        # Framework Backend
+        lbl_fw = Gtk.Label(label=f"{tr(self.lang, 'qm_framework')}:", xalign=0)
         lbl_fw.get_style_context().add_class("section-label")
         main_box.pack_start(lbl_fw, False, False, 0)
 
         fw_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.btn_fw_auto = Gtk.Button(label="Auto")
+        self.btn_fw_auto = Gtk.Button(label=tr(self.lang, "fw_auto"))
         self.btn_fw_auto.get_style_context().add_class("mode-btn")
         self.btn_fw_auto.connect("clicked", lambda w: self._set_fw("auto"))
 
@@ -202,13 +231,13 @@ class QuickMenuDialog(Gtk.Window):
         fw_box.pack_start(self.btn_fw_uinput, True, True, 0)
         main_box.pack_start(fw_box, False, False, 2)
 
-        # Output Mode section
-        lbl_mode = Gtk.Label(label="Chế độ gửi phím:", xalign=0)
+        # Output Mode
+        lbl_mode = Gtk.Label(label=f"{tr(self.lang, 'qm_output_mode')}:", xalign=0)
         lbl_mode.get_style_context().add_class("section-label")
         main_box.pack_start(lbl_mode, False, False, 0)
 
         out_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.btn_preedit = Gtk.Button(label="Pre-edit (Atomic)")
+        self.btn_preedit = Gtk.Button(label="Pre-edit")
         self.btn_preedit.get_style_context().add_class("mode-btn")
         self.btn_preedit.connect("clicked", lambda w: self._set_out_mode("preedit"))
 
@@ -220,42 +249,43 @@ class QuickMenuDialog(Gtk.Window):
         out_box.pack_start(self.btn_surrounding, True, True, 0)
         main_box.pack_start(out_box, False, False, 2)
 
-        # Tone & Typing Options
-        lbl_opts = Gtk.Label(label="Tùy chọn nhanh:", xalign=0)
+        # Options
+        lbl_opts = Gtk.Label(label=f"{tr(self.lang, 'qm_options')}:", xalign=0)
         lbl_opts.get_style_context().add_class("section-label")
         main_box.pack_start(lbl_opts, False, False, 0)
 
-        self.chk_bilingual = Gtk.CheckButton(label="Song ngữ thông minh (Smart Bilingual)")
+        self.chk_bilingual = Gtk.CheckButton(label=tr(self.lang, "opt_bilingual"))
         self.chk_bilingual.set_active(self.cfg.get("auto_correct", True))
         self.chk_bilingual.connect("toggled", lambda w: self._toggle_opt("auto_correct", w.get_active()))
         main_box.pack_start(self.chk_bilingual, False, False, 0)
 
-        self.chk_macro = Gtk.CheckButton(label="Cho phép gõ tắt (Macro Expansion)")
+        self.chk_macro = Gtk.CheckButton(label=tr(self.lang, "opt_macro_enable"))
         self.chk_macro.set_active(self.cfg.get("macro_enabled", True))
         self.chk_macro.connect("toggled", lambda w: self._toggle_opt("macro_enabled", w.get_active()))
         main_box.pack_start(self.chk_macro, False, False, 0)
 
-        self.chk_modern = Gtk.CheckButton(label="Bỏ dấu kiểu mới (Modern Orthography: oà, uý)")
+        self.chk_modern = Gtk.CheckButton(label=tr(self.lang, "opt_modern"))
         self.chk_modern.set_active(self.cfg.get("modern_tone_style", True))
         self.chk_modern.connect("toggled", lambda w: self._toggle_opt("modern_tone_style", w.get_active()))
         main_box.pack_start(self.chk_modern, False, False, 0)
 
-        self.chk_w2u = Gtk.CheckButton(label="Gõ nhanh W thành Ư (W to Ư)")
+        self.chk_w2u = Gtk.CheckButton(label=tr(self.lang, "opt_w2u"))
         self.chk_w2u.set_active(self.cfg.get("w2u", True))
         self.chk_w2u.connect("toggled", lambda w: self._toggle_opt("w2u", w.get_active()))
         main_box.pack_start(self.chk_w2u, False, False, 0)
 
-        # Hint footer
-        lbl_hint = Gtk.Label(
-            label="Phím tắt: Bấm ` mở Quick Menu • Bấm đúp `` gõ dấu ` • Ctrl+Shift chuyển Anh/Việt • ESC đóng",
-            xalign=0
-        )
+        lbl_hint = Gtk.Label(label=tr(self.lang, "qm_hint"), xalign=0)
         lbl_hint.get_style_context().add_class("hint-bar")
         main_box.pack_start(lbl_hint, False, False, 4)
 
-        self.connect("key-press-event", self._on_key_press)
-        self.connect("focus-out-event", self._on_focus_out)
         self._update_buttons()
+        self.root_box.show_all()
+
+    def _on_toggle_lang(self, btn):
+        self.lang = "en" if self.lang == "vi" else "vi"
+        self.cfg["ui_lang"] = self.lang
+        self._save()
+        self._build_content()
 
     def _on_focus_out(self, widget, event):
         self.close()
@@ -292,7 +322,7 @@ class QuickMenuDialog(Gtk.Window):
                 ctx.remove_class("active")
 
         eff_fw = resolve_effective_framework(curr_fw).upper()
-        self.lbl_sub.set_text(f"Quick Menu • Backend: {eff_fw} • Tác giả: Victor Pham")
+        self.lbl_sub.set_text(f"{eff_fw}")
 
     def _set_im(self, val):
         self.cfg["input_method"] = val
@@ -338,5 +368,5 @@ def show_quick_menu():
     Gtk.main()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     show_quick_menu()

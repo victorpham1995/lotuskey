@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 LotusKey - Configuration Manager
-Handles persistence and bidirectional synchronization between config.json, config.env,
-macros.conf, and multi-framework Linux IME backends (IBus, Fcitx5, Fcitx4, UInput).
+Manages config.json, config.env, macros.conf, and autostart entries.
 """
 import json
 import os
@@ -20,22 +19,23 @@ AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "lotuskey.desktop")
 
 DEFAULT_CONFIG = {
-    "enabled": True,             # Trạng thái gõ tiếng Việt (True = VN, False = EN)
-    "input_method": 0,           # Kiểu gõ: 0: Telex, 1: VNI, 2: Telex+VNI
-    "output_mode": "preedit",    # Chế độ gửi phím: "preedit", "surrounding", "forward"
-    "im_framework": "auto",      # Hệ thống bộ gõ Linux: "auto", "ibus", "fcitx5", "fcitx", "uinput"
-    "charset": 0,                # Bảng mã: 0: Unicode UTF-8, 31: Unicode Tổ hợp, 27: TCVN3, 34: VNI Windows
-    "free_tone_marking": True,   # Bỏ dấu tự do (Free-tone marking)
-    "modern_tone_style": True,   # Bỏ dấu kiểu mới (Modern orthography: oà, uý)
-    "auto_correct": True,        # Song ngữ thông minh (Smart Bilingual)
-    "w2u": True,                 # Gõ nhanh W thành Ư (W to Ư)
-    "bracket_transform": True,   # Gõ nhanh [ thành ơ và ] thành ư (Bracket transform)
-    "macro_enabled": True,       # Bật gõ tắt (Macro expansion)
-    "toggle_key": "Both",        # Hotkey chuyển Anh/Việt: "Both", "Control+Shift", "Alt+Z", "Shift+Space", "None"
-    "mode_menu_key": "grave",    # Phím tắt Quick Menu: "grave" (phím `), "None"
-    "quick_telex": False,        # Gõ tắt phụ âm nhanh (Quick Telex: cc=ch, gg=gi...)
-    "preedit_underline": False,  # Gạch chân chữ đang đệm (Pre-edit underline)
-    "autostart": True,           # Khởi động cùng hệ thống (Autostart with OS)
+    "enabled": True,
+    "ui_lang": "vi",             # "vi" or "en"
+    "input_method": 0,           # 0: Telex, 1: VNI, 2: Telex+VNI
+    "output_mode": "preedit",    # "preedit", "surrounding", "forward"
+    "im_framework": "auto",      # "auto", "ibus", "fcitx5", "fcitx", "uinput"
+    "charset": 0,                # 0: Unicode NFC, 31: Unicode NFD, 27: TCVN3, 34: VNI Windows
+    "free_tone_marking": True,
+    "modern_tone_style": True,
+    "auto_correct": True,
+    "w2u": True,
+    "bracket_transform": True,
+    "macro_enabled": True,
+    "toggle_key": "Both",        # "Both", "Control+Shift", "Alt+Z", "Shift+Space", "None"
+    "mode_menu_key": "grave",    # "grave", "None"
+    "quick_telex": False,
+    "preedit_underline": False,
+    "autostart": True,
 }
 
 DEFAULT_MACROS = [
@@ -48,18 +48,33 @@ DEFAULT_MACROS = [
 ]
 
 
-def is_autostart_enabled():
+def _secure_dir(path: str) -> None:
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _secure_file(path: str) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def is_autostart_enabled() -> bool:
     if not os.path.exists(AUTOSTART_FILE):
         return False
     try:
         with open(AUTOSTART_FILE, "r", encoding="utf-8") as f:
             content = f.read()
             return "X-GNOME-Autostart-enabled=false" not in content and "Hidden=true" not in content
-    except Exception:
+    except OSError:
         return False
 
 
-def set_autostart(enabled: bool, preferred_framework: str = "auto"):
+def set_autostart(enabled: bool, preferred_framework: str = "auto") -> None:
     try:
         os.makedirs(AUTOSTART_DIR, exist_ok=True)
         if enabled:
@@ -67,45 +82,46 @@ def set_autostart(enabled: bool, preferred_framework: str = "auto"):
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             if effective == "fcitx5":
                 engine_exec = "fcitx5 -d"
-                comment = "Bộ gõ tiếng Việt LotusKey (Fcitx5)"
+                comment = "LotusKey Vietnamese Input (Fcitx5)"
             elif effective == "fcitx":
                 engine_exec = "fcitx -d"
-                comment = "Bộ gõ tiếng Việt LotusKey (Fcitx4)"
+                comment = "LotusKey Vietnamese Input (Fcitx4)"
             elif effective == "uinput":
                 engine_exec = f"{get_uinput_binary()} --daemon"
-                comment = "Bộ gõ tiếng Việt LotusKey (UInput Universal Daemon)"
+                comment = "LotusKey Vietnamese Input (UInput)"
             else:
                 local_engine = os.path.join(base_dir, "bin", "ibus-engine-lotuskey")
                 sys_engine = "/usr/lib/lotuskey/ibus-engine-lotuskey"
                 bin_path = local_engine if os.path.exists(local_engine) else sys_engine
                 engine_exec = f"{bin_path} --ibus"
-                comment = "Bộ gõ tiếng Việt LotusKey (IBus Native)"
+                comment = "LotusKey Vietnamese Input (IBus)"
 
             from config.distro_adapter import DistroAdapter
             icon_path = DistroAdapter.get_icon_path(active=True)
 
-            content = f"""[Desktop Entry]
-Type=Application
-Name=LotusKey
-Comment={comment}
-Exec={engine_exec}
-Icon={icon_path}
-Terminal=false
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-"""
+            content = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=LotusKey\n"
+                f"Comment={comment}\n"
+                f"Exec={engine_exec}\n"
+                f"Icon={icon_path}\n"
+                "Terminal=false\n"
+                "Hidden=false\n"
+                "NoDisplay=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
+            )
             with open(AUTOSTART_FILE, "w", encoding="utf-8") as f:
                 f.write(content)
         else:
             if os.path.exists(AUTOSTART_FILE):
                 os.remove(AUTOSTART_FILE)
-    except Exception as e:
-        print(f"Error setting autostart: {e}")
+    except OSError:
+        pass
 
 
 def load_macros():
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    _secure_dir(CONFIG_DIR)
     if os.path.exists(MACROS_JSON_FILE):
         try:
             with open(MACROS_JSON_FILE, "r", encoding="utf-8") as f:
@@ -131,21 +147,22 @@ def load_macros():
     return [m.copy() for m in DEFAULT_MACROS]
 
 
-def save_macros(macros):
+def save_macros(macros) -> bool:
     try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+        _secure_dir(CONFIG_DIR)
         with open(MACROS_JSON_FILE, "w", encoding="utf-8") as f:
             json.dump(macros, f, indent=4, ensure_ascii=False)
+        _secure_file(MACROS_JSON_FILE)
         with open(MACROS_CONF_FILE, "w", encoding="utf-8") as f:
-            f.write("# LotusKey Macro Table (key=value)\n")
+            f.write("# LotusKey Macros (key=value)\n")
             for item in macros:
                 k = str(item.get("key", "")).strip()
                 v = str(item.get("value", "")).strip()
                 if k and v and "=" not in k:
                     f.write(f"{k}={v}\n")
+        _secure_file(MACROS_CONF_FILE)
         return True
-    except Exception as e:
-        print(f"Error saving macros: {e}")
+    except OSError:
         return False
 
 
@@ -164,6 +181,8 @@ def _parse_env_file():
                 v = v.strip().strip('"').strip("'")
                 if k == "ENABLED":
                     cfg_updates["enabled"] = (v.lower() not in ("false", "0"))
+                elif k == "UI_LANG":
+                    cfg_updates["ui_lang"] = "en" if v.lower().startswith("en") else "vi"
                 elif k == "INPUT_METHOD":
                     if "telex_vni" in v.lower():
                         cfg_updates["input_method"] = 2
@@ -202,14 +221,13 @@ def _parse_env_file():
                         pass
                 elif k == "AUTOSTART":
                     cfg_updates["autostart"] = (v.lower() not in ("false", "0"))
-    except Exception as e:
-        print(f"Error parsing config.env: {e}")
+    except OSError:
+        pass
     return cfg_updates
 
 
 def load_config():
-    if not os.path.exists(CONFIG_DIR):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+    _secure_dir(CONFIG_DIR)
     if not os.path.exists(CONFIG_FILE) and not os.path.exists(CONFIG_ENV_FILE):
         save_config(DEFAULT_CONFIG)
         load_macros()
@@ -217,16 +235,15 @@ def load_config():
 
     cfg = DEFAULT_CONFIG.copy()
 
-    # Load from config.json if exists
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved_json = json.load(f)
-                cfg.update(saved_json)
-        except Exception as e:
-            print(f"Error loading config.json: {e}")
+                if isinstance(saved_json, dict):
+                    cfg.update(saved_json)
+        except Exception:
+            pass
 
-    # If config.env exists and is newer than config.json, sync from config.env
     if os.path.exists(CONFIG_ENV_FILE):
         try:
             env_mtime = os.path.getmtime(CONFIG_ENV_FILE)
@@ -236,8 +253,9 @@ def load_config():
                 cfg.update(env_updates)
                 with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error syncing config.env to json: {e}")
+                _secure_file(CONFIG_FILE)
+        except OSError:
+            pass
 
     if not os.path.exists(CONFIG_ENV_FILE):
         _write_env_file(cfg)
@@ -246,16 +264,21 @@ def load_config():
 
     if "autostart" not in cfg:
         cfg["autostart"] = is_autostart_enabled()
+    if cfg.get("ui_lang") not in ("vi", "en"):
+        cfg["ui_lang"] = "vi"
 
     return cfg
 
 
-def _write_env_file(cfg):
+def _write_env_file(cfg) -> None:
     try:
+        _secure_dir(CONFIG_DIR)
         im_val = cfg.get("input_method", 0)
         im_name = "vni" if im_val == 1 else ("telex_vni" if im_val == 2 else "telex")
+        ui_lang = "en" if str(cfg.get("ui_lang", "vi")).startswith("en") else "vi"
         with open(CONFIG_ENV_FILE, "w", encoding="utf-8") as f:
             f.write(f'ENABLED="{"true" if cfg.get("enabled", True) else "false"}"\n')
+            f.write(f'UI_LANG="{ui_lang}"\n')
             f.write(f'INPUT_METHOD="{im_name}"\n')
             f.write(f'GRAMMAR_PROFILE="{"sen_flex" if cfg.get("free_tone_marking", True) else "classic"}"\n')
             f.write(f'SMART_BILINGUAL="{"true" if cfg.get("auto_correct", True) else "false"}"\n')
@@ -271,19 +294,20 @@ def _write_env_file(cfg):
             f.write(f'IM_FRAMEWORK="{cfg.get("im_framework", "auto")}"\n')
             f.write(f'CHARSET="{cfg.get("charset", 0)}"\n')
             f.write(f'AUTOSTART="{"true" if cfg.get("autostart", True) else "false"}"\n')
-    except Exception as e:
-        print(f"Error writing config.env: {e}")
+        _secure_file(CONFIG_ENV_FILE)
+    except OSError:
+        pass
 
 
-def save_config(cfg):
+def save_config(cfg) -> bool:
     try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+        _secure_dir(CONFIG_DIR)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4, ensure_ascii=False)
+        _secure_file(CONFIG_FILE)
         _write_env_file(cfg)
         if "autostart" in cfg:
             set_autostart(cfg["autostart"], cfg.get("im_framework", "auto"))
         return True
-    except Exception as e:
-        print(f"Error saving config: {e}")
+    except OSError:
         return False
