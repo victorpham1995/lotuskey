@@ -78,6 +78,6 @@ Description: LotusKey Multi-Framework Vietnamese Input Method for Linux
  Supports IBus Native C Engine, Fcitx5 Adapter, Fcitx4, and Universal UInput Daemon.
 EOF
 
-dpkg-deb --build "$BUILD_DIR" "$ROOT_DIR/${PKG_NAME}.deb"
+dpkg-deb --root-owner-group --build "$BUILD_DIR" "$ROOT_DIR/${PKG_NAME}.deb"
 rm -rf "$BUILD_DIR"
 echo "✓ Đã tạo gói: $ROOT_DIR/${PKG_NAME}.deb"
