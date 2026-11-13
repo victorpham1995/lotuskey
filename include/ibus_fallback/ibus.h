@@ -213,7 +213,7 @@ struct _IBusServiceClass {
                                        const gchar *property_name,
                                        GVariant *value,
                                        GError **error);
-    gpointer pdummy[4];
+    gpointer pdummy[5];
 };
 
 GType ibus_service_get_type(void);

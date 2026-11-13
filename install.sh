@@ -170,8 +170,8 @@ gi.require_version('IBus', '1.0')
 from gi.repository import IBus
 
 reg = IBus.Registry.new()
-reg.load()
 reg.load_in_dir(os.path.expanduser('~/.local/share/ibus/component'))
+reg.load()
 cache_path = os.path.expanduser('~/.cache/ibus/bus/registry')
 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 ok = reg.save_cache_file(cache_path)
@@ -179,14 +179,31 @@ if ok:
     print(' -> Updated IBus registry cache:', cache_path)
 " 2>/dev/null || true
 
+pkill -x fcitx5 2>/dev/null || true
+pkill -x ibus-engine-lot 2>/dev/null || true
+if systemctl --user list-unit-files org.freedesktop.IBus.session.GNOME.service >/dev/null 2>&1; then
+    systemctl --user restart org.freedesktop.IBus.session.GNOME.service 2>/dev/null || ibus restart 2>/dev/null || true
+elif command -v ibus >/dev/null 2>&1; then
+    ibus restart 2>/dev/null || true
+fi
+sleep 1.5
+
+python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.im_framework import sync_ibus_wayland_socket
+sync_ibus_wayland_socket()
+" 2>/dev/null || true
+
+nohup "$ROOT_DIR/bin/ibus-engine-lotuskey" --ibus >/dev/null 2>&1 &
+sleep 0.5
+
 if command -v gsettings >/dev/null 2>&1; then
     gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
     gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
 fi
 if command -v ibus >/dev/null 2>&1; then
-    ibus restart 2>/dev/null || true
-    sleep 1
-    ibus engine lotuskey 2>/dev/null || ibus engine lotus 2>/dev/null || true
+    timeout 3 ibus engine lotuskey 2>/dev/null || true
 fi
 
 echo "=== Installation complete ==="

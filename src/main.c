@@ -81,6 +81,7 @@ struct _IBusLotusEngine {
 
 struct _IBusLotusEngineClass {
     IBusEngineClass parent_class;
+    gpointer padding[8];
 };
 
 GType ibus_lotus_engine_get_type(void);

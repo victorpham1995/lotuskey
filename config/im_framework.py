@@ -54,10 +54,10 @@ def detect_desktop_environment() -> Dict[str, str]:
     }
 
 
-def _is_process_running(proc_pattern: str) -> bool:
+def _is_process_running(proc_name: str) -> bool:
     try:
         res = subprocess.run(
-            ["pgrep", "-f", proc_pattern],
+            ["pgrep", "-x", proc_name[:15]],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -65,6 +65,23 @@ def _is_process_running(proc_pattern: str) -> bool:
         return res.returncode == 0
     except Exception:
         return False
+
+
+def sync_ibus_wayland_socket() -> None:
+    """Ensures X11/CLI IBus socket file (<id>-unix-0) mirrors Wayland socket (<id>-unix-wayland-0)."""
+    try:
+        bus_dir = os.path.expanduser("~/.config/ibus/bus")
+        if not os.path.isdir(bus_dir):
+            return
+        wayland_files = sorted(glob.glob(os.path.join(bus_dir, "*-unix-wayland-*")))
+        for wf in wayland_files:
+            if os.path.getsize(wf) > 64:
+                machine_id = os.path.basename(wf).split("-")[0]
+                x11_file = os.path.join(bus_dir, f"{machine_id}-unix-0")
+                shutil.copyfile(wf, x11_file)
+                break
+    except Exception:
+        pass
 
 
 def get_uinput_binary() -> str:
@@ -464,9 +481,19 @@ def apply_framework_config(cfg: Dict[str, Any], macros: List[Dict[str, str]] = N
         write_im_environment_profile(effective)
 
     if effective == "ibus":
-        # Stop uinput daemon if running so keys aren't processed twice
+        # Stop uinput daemon or fcitx5 ibusfrontend if running so org.freedesktop.IBus isn't hijacked
         if frameworks["uinput"]["running"]:
-            subprocess.run(["pkill", "-f", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-x", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if frameworks["fcitx5"]["running"]:
+            subprocess.run(["pkill", "-x", "fcitx5"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        sync_ibus_wayland_socket()
+        if not _is_process_running("ibus-engine-lot"):
+            local_eng = os.path.join(BASE_DIR, "bin", "ibus-engine-lotuskey")
+            sys_eng = "/usr/lib/lotuskey/ibus-engine-lotuskey"
+            eng_bin = local_eng if (os.path.isfile(local_eng) and os.access(local_eng, os.X_OK)) else sys_eng
+            if os.path.isfile(eng_bin) and os.access(eng_bin, os.X_OK):
+                subprocess.Popen([eng_bin, "--ibus"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         target_engine = "lotuskey-vni" if cfg.get("input_method") == 1 else "lotuskey"
         env = detect_desktop_environment()
@@ -481,25 +508,28 @@ def apply_framework_config(cfg: Dict[str, Any], macros: List[Dict[str, str]] = N
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
         if shutil.which("ibus"):
-            subprocess.run(["ibus", "engine", target_engine], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["pkill", "-USR1", "-f", "ibus-engine-lotus"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                subprocess.run(["ibus", "engine", target_engine], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            except Exception:
+                pass
+        subprocess.run(["pkill", "-USR1", "-x", "ibus-engine-lot"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     elif effective == "fcitx5":
         if frameworks["uinput"]["running"]:
-            subprocess.run(["pkill", "-f", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-x", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if switch_daemon and not frameworks["fcitx5"]["running"] and shutil.which("fcitx5"):
             subprocess.Popen(["fcitx5", "-r", "-d"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     elif effective == "fcitx":
         if frameworks["uinput"]["running"]:
-            subprocess.run(["pkill", "-f", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-x", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if switch_daemon and not frameworks["fcitx"]["running"] and shutil.which("fcitx"):
             subprocess.Popen(["fcitx", "-r", "-d"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     elif effective == "uinput":
         uinput_bin = get_uinput_binary()
         if _is_process_running("lotuskey-uinput"):
-            subprocess.run(["pkill", "-USR1", "-f", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-USR1", "-x", "lotuskey-uinput"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif switch_daemon and os.path.isfile(uinput_bin) and os.access(uinput_bin, os.X_OK):
             subprocess.Popen([uinput_bin, "--daemon"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

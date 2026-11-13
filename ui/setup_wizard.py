@@ -315,8 +315,8 @@ def run_installation_step(step_idx, emit_log):
             if HAS_IBUS_GI and IBus is not None:
                 try:
                     reg = IBus.Registry.new()
-                    reg.load()
                     reg.load_in_dir(comp_dir)
+                    reg.load()
                     cache_path = os.path.expanduser("~/.cache/ibus/bus/registry")
                     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                     reg.save_cache_file(cache_path)
