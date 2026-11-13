@@ -112,8 +112,17 @@ ln -sf "$ROOT_DIR/bin/lotuskey-setup" ~/.local/bin/lotuskey
 
 # 4. Generate and install IBus Component XML & Desktop Entry
 echo "[4/6] Registering IBus component and desktop entry..."
-mkdir -p ~/.local/share/ibus/component
-rm -f ~/.local/share/ibus/component/lotus.xml
+COMP_DIR="$HOME/.local/share/ibus/component"
+mkdir -p "$COMP_DIR"
+rm -f "$COMP_DIR/lotus.xml"
+for sys_xml in /usr/share/ibus/component/*.xml; do
+    [ -e "$sys_xml" ] || continue
+    base_xml="$(basename "$sys_xml")"
+    if [ "$base_xml" != "lotuskey.xml" ] && [ "$base_xml" != "lotus.xml" ]; then
+        ln -sf "$sys_xml" "$COMP_DIR/$base_xml"
+    fi
+done
+
 ICON_PATH="$(python3 -c "
 import sys, os
 sys.path.insert(0, '$ROOT_DIR')
@@ -163,14 +172,14 @@ print(' -> Active input backend:', eff.upper())
 
 # 6. Update IBus Registry cache & Active IM Backend
 echo "[6/6] Updating IBus registry cache and activating engine..."
-python3 -c "
+systemctl --user set-environment IBUS_COMPONENT_PATH="$COMP_DIR" 2>/dev/null || true
+IBUS_COMPONENT_PATH="$COMP_DIR" python3 -c "
 import os
 import gi
 gi.require_version('IBus', '1.0')
 from gi.repository import IBus
 
 reg = IBus.Registry.new()
-reg.load_in_dir(os.path.expanduser('~/.local/share/ibus/component'))
 reg.load()
 cache_path = os.path.expanduser('~/.cache/ibus/bus/registry')
 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -195,15 +204,23 @@ from config.im_framework import sync_ibus_wayland_socket
 sync_ibus_wayland_socket()
 " 2>/dev/null || true
 
-nohup "$ROOT_DIR/bin/ibus-engine-lotuskey" --ibus >/dev/null 2>&1 &
-sleep 0.5
-
 if command -v gsettings >/dev/null 2>&1; then
     gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
     gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
 fi
 if command -v ibus >/dev/null 2>&1; then
-    timeout 3 ibus engine lotuskey 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.im_framework import sync_ibus_wayland_socket
+sync_ibus_wayland_socket()
+" 2>/dev/null || true
+        if timeout 2 ibus engine lotuskey 2>/dev/null; then
+            break
+        fi
+        sleep 0.6
+    done
 fi
 
 echo "=== Installation complete ==="
