@@ -48,6 +48,14 @@ if ! command -v "$CC_BIN" >/dev/null 2>&1; then
     CC_BIN="cc"
 fi
 
+HAVE_PREBUILT=0
+if [ -x "$ROOT_DIR/bin/ibus-engine-lotuskey" ] && [ -x "$ROOT_DIR/bin/lotuskey-uinput" ]; then
+    HAVE_PREBUILT=1
+fi
+if [ "$HAVE_PREBUILT" = "1" ] && { [ "${LOTUSKEY_PREBUILT:-0}" = "1" ] || ! command -v "$CC_BIN" >/dev/null 2>&1; }; then
+    echo " -> Using prebuilt binaries (no compilation needed)"
+else
+
 IBUS_CFLAGS_ARR=($(python3 -c "
 import sys
 sys.path.insert(0, '$ROOT_DIR')
@@ -88,6 +96,7 @@ print(' '.join(ldflags))
 if command -v objcopy >/dev/null 2>&1; then
     objcopy --remove-section=.comment --remove-section=.note.gnu.build-id "$ROOT_DIR/bin/ibus-engine-lotuskey" 2>/dev/null || true
     objcopy --remove-section=.comment --remove-section=.note.gnu.build-id "$ROOT_DIR/bin/lotuskey-uinput" 2>/dev/null || true
+fi
 fi
 
 ln -sf ibus-engine-lotuskey "$ROOT_DIR/bin/ibus-engine-lotus"

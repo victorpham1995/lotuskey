@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  debian-appimage-tarball:
+    name: DEB + AppImage + Tarball (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libglib2.0-dev libibus-1.0-dev \
+            python3 dpkg-dev file desktop-file-utils
+      - name: Build binaries
+        run: packaging/build_binaries.sh
+      - name: Build .deb
+        run: SKIP_COMPILE=1 packaging/build_deb.sh
+      - name: Build AppImage
+        run: SKIP_COMPILE=1 packaging/build_appimage.sh
+      - name: Build generic tarball
+        run: SKIP_COMPILE=1 packaging/build_tarball.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-debian-appimage-tarball
+          path: dist/*
+
+  fedora-rpm:
+    name: RPM (Fedora / RHEL)
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y gcc python3 glib2-devel ibus-devel rpm-build pkgconf-pkg-config git binutils
+      - uses: actions/checkout@v4
+      - name: Build RPM
+        run: |
+          rpmbuild -bb --define "srcroot $GITHUB_WORKSPACE" --define "_rpmdir $GITHUB_WORKSPACE/rpmout" packaging/ibus-lotuskey.spec
+          mkdir -p dist
+          for f in rpmout/*/*.rpm; do cp "$f" "dist/$(basename "${f%.rpm}" | sed 's/\.fc[0-9]*//').fedora.rpm"; done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-fedora-rpm
+          path: dist/*
+
+  opensuse-rpm:
+    name: RPM (openSUSE)
+    runs-on: ubuntu-latest
+    container: opensuse/tumbleweed:latest
+    steps:
+      - name: Install build dependencies
+        run: zypper --non-interactive install gcc python3 glib2-devel ibus-devel rpm-build pkgconf tar gzip git binutils
+      - uses: actions/checkout@v4
+      - name: Build RPM
+        run: |
+          rpmbuild -bb --define "srcroot $GITHUB_WORKSPACE" --define "_rpmdir $GITHUB_WORKSPACE/rpmout" packaging/ibus-lotuskey.spec
+          mkdir -p dist
+          for f in rpmout/*/*.rpm; do cp "$f" "dist/$(basename "${f%.rpm}").opensuse.rpm"; done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-opensuse-rpm
+          path: dist/*
+
+  arch-pkg:
+    name: Arch Linux / Manjaro (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git python glib2 ibus gtk3 python-gobject
+      - uses: actions/checkout@v4
+      - name: Build package
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging' && PKGDEST='$GITHUB_WORKSPACE/dist' makepkg -f --nodeps"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-arch
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs: [debian-appimage-tarball, fedora-rpm, opensuse-rpm, arch-pkg]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: pkg-*
+          merge-multiple: true
+      - name: Generate checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: LotusKey ${{ github.ref_name }}
+          body_path: packaging/RELEASE_NOTES.md
+          files: dist/*

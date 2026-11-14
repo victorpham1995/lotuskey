@@ -12,3 +12,6 @@ __pycache__/
 *.log
 .env
 nohup.out
+dist/
+*.AppImage
+*.tar.gz

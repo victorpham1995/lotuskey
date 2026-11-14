@@ -232,8 +232,8 @@ typedef struct _IBusEnginePrivate IBusEnginePrivate;
 struct _IBusEngine {
     IBusService parent;
     IBusEnginePrivate *priv;
-    guint enabled : 1;
-    guint has_focus : 1;
+    gboolean enabled;
+    gboolean has_focus;
     IBusRectangle cursor_area;
     guint client_capabilities;
 };

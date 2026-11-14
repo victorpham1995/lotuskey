@@ -1,66 +1,24 @@
 # Maintainer: Victor Pham <https://github.com/victorpham1995/lotuskey>
 pkgname=ibus-lotuskey
-pkgver=2.2.0
+pkgver=2.2.1
 pkgrel=1
 pkgdesc="Vietnamese Input Method Engine for Linux (IBus / Fcitx5 / UInput)"
 arch=('x86_64')
 url="https://github.com/victorpham1995/lotuskey"
 license=('MIT')
 depends=('ibus' 'glib2' 'gtk3' 'python' 'python-gobject')
-optdepends=(
-    'fcitx5: Fcitx5 Input Method Framework support'
-    'gtk4: GTK4 Quick Menu support'
-)
+optdepends=('fcitx5: Fcitx5 Input Method Framework support')
 makedepends=('gcc' 'pkgconf')
+options=('!strip' '!debug')
+install=ibus-lotuskey.install
 source=()
 
 build() {
     cd "${startdir}/.."
-    ln -sf libLotusKeyCAPI.so lib/libLotusKeyCAPI.so.0
-
-    # Build Native C IBus Engine
-    gcc -O2 -s -fno-ident -Wall -Wextra \
-        -Wl,--build-id=none -Wl,-z,relro,-z,now \
-        -Iinclude -Iinclude/ibus_fallback \
-        $(pkg-config --cflags glib-2.0 gobject-2.0 gio-2.0) \
-        src/main.c \
-        -Llib -Wl,-rpath,/usr/lib/lotuskey \
-        -libus-1.0 $(pkg-config --libs glib-2.0 gobject-2.0 gio-2.0) \
-        -lLotusKeyCAPI \
-        -o bin/ibus-engine-lotuskey
-
-    # Build Native C UInput Daemon
-    gcc -O2 -s -fno-ident -Wall -Wextra \
-        -Wl,--build-id=none -Wl,-z,relro,-z,now \
-        -Iinclude src/uinput_daemon.c \
-        -Llib -Wl,-rpath,/usr/lib/lotuskey \
-        -lLotusKeyCAPI \
-        -o bin/lotuskey-uinput
+    packaging/build_binaries.sh
 }
 
 package() {
     cd "${startdir}/.."
-
-    install -dm755 "${pkgdir}/usr/lib/lotuskey"
-    install -dm755 "${pkgdir}/usr/share/lotuskey/config"
-    install -dm755 "${pkgdir}/usr/share/lotuskey/ui"
-    install -dm755 "${pkgdir}/usr/bin"
-    install -dm755 "${pkgdir}/usr/share/ibus/component"
-    install -dm755 "${pkgdir}/usr/share/icons/hicolor/scalable/apps"
-    install -dm755 "${pkgdir}/usr/lib/udev/rules.d"
-
-    install -Dm755 bin/ibus-engine-lotuskey "${pkgdir}/usr/lib/lotuskey/ibus-engine-lotuskey"
-    install -Dm755 bin/lotuskey-uinput "${pkgdir}/usr/lib/lotuskey/lotuskey-uinput"
-    install -Dm755 lib/libLotusKeyCAPI.so "${pkgdir}/usr/lib/lotuskey/libLotusKeyCAPI.so"
-    ln -sf libLotusKeyCAPI.so "${pkgdir}/usr/lib/lotuskey/libLotusKeyCAPI.so.0"
-
-    install -Dm644 config/*.py "${pkgdir}/usr/share/lotuskey/config/"
-    install -Dm755 ui/*.py "${pkgdir}/usr/share/lotuskey/ui/"
-
-    install -Dm644 assets/lotuskey.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/lotuskey.svg"
-    install -Dm644 assets/lotuskey-off.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/lotuskey-off.svg"
-
-    cat > "${pkgdir}/usr/lib/udev/rules.d/99-lotuskey-uinput.rules" << 'EOF'
-KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
-EOF
+    packaging/stage_install.sh "${pkgdir}" /usr/lib/udev/rules.d
 }

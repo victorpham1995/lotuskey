@@ -68,17 +68,26 @@ def _is_process_running(proc_name: str) -> bool:
 
 
 def sync_ibus_wayland_socket() -> None:
-    """Ensures X11/CLI IBus socket file (<id>-unix-0) mirrors Wayland socket (<id>-unix-wayland-0)."""
+    """Ensures X11/CLI IBus socket file (<id>-unix-0) symlinks to active Wayland socket (<id>-unix-wayland-0)."""
     try:
         bus_dir = os.path.expanduser("~/.config/ibus/bus")
         if not os.path.isdir(bus_dir):
             return
-        wayland_files = sorted(glob.glob(os.path.join(bus_dir, "*-unix-wayland-*")))
+        wayland_files = sorted(
+            glob.glob(os.path.join(bus_dir, "*-unix-wayland-*")),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
         for wf in wayland_files:
             if os.path.getsize(wf) > 64:
                 machine_id = os.path.basename(wf).split("-")[0]
                 x11_file = os.path.join(bus_dir, f"{machine_id}-unix-0")
-                shutil.copyfile(wf, x11_file)
+                if os.path.islink(x11_file) or os.path.exists(x11_file):
+                    try:
+                        os.remove(x11_file)
+                    except OSError:
+                        pass
+                os.symlink(os.path.basename(wf), x11_file)
                 break
     except Exception:
         pass
@@ -205,7 +214,7 @@ def generate_ibus_component_xml(engine_exec: str, setup_exec: str) -> str:
 <component>
     <name>org.freedesktop.IBus.LotusKey</name>
     <description>LotusKey Vietnamese Input Method Engine</description>
-    <version>2.2.0</version>
+    <version>2.2.1</version>
     <author>Victor Pham</author>
     <homepage>https://github.com/victorpham1995/lotuskey</homepage>
     <license>MIT</license>

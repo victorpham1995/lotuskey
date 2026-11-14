@@ -46,6 +46,7 @@ typedef struct _IBusLotusEngineClass IBusLotusEngineClass;
 
 struct _IBusLotusEngine {
     IBusEngine parent;
+    gpointer _abi_guard[4];
     lotuskey_session_t session;
     gboolean enabled;
     gboolean is_vni;
@@ -1502,6 +1503,76 @@ static void setup_config_monitors(void) {
     g_free(dir_path);
 }
 
+static void ensure_live_ibus_socket(void) {
+    const gchar *home = g_get_home_dir();
+    if (!home) return;
+    gchar *bus_dir = g_build_filename(home, ".config", "ibus", "bus", NULL);
+    GDir *dir = g_dir_open(bus_dir, 0, NULL);
+    if (!dir) {
+        g_free(bus_dir);
+        return;
+    }
+
+    const gchar *entry = NULL;
+    gchar *wayland_file = NULL;
+    gchar *x11_file = NULL;
+    while ((entry = g_dir_read_name(dir)) != NULL) {
+        if (strstr(entry, "-unix-wayland-") != NULL) {
+            g_free(wayland_file);
+            wayland_file = g_build_filename(bus_dir, entry, NULL);
+            const char *dash = strchr(entry, '-');
+            if (dash) {
+                gchar *mid = g_strndup(entry, (gsize)(dash - entry));
+                gchar *x11_name = g_strdup_printf("%s-unix-0", mid);
+                g_free(x11_file);
+                x11_file = g_build_filename(bus_dir, x11_name, NULL);
+                g_free(x11_name);
+                g_free(mid);
+            }
+        }
+    }
+    g_dir_close(dir);
+
+    if (wayland_file && g_file_test(wayland_file, G_FILE_TEST_IS_REGULAR)) {
+        if (x11_file && !g_file_test(x11_file, G_FILE_TEST_IS_SYMLINK)) {
+            unlink(x11_file);
+            gchar *base_wf = g_path_get_basename(wayland_file);
+            if (symlink(base_wf, x11_file) != 0) {
+                /* ignore */
+            }
+            g_free(base_wf);
+        }
+
+        if (!g_getenv("IBUS_ADDRESS")) {
+            FILE *fp = fopen(wayland_file, "r");
+            if (fp) {
+                char line[512];
+                char addr[512] = {0};
+                long pid = 0;
+                while (fgets(line, sizeof(line), fp)) {
+                    if (strncmp(line, "IBUS_ADDRESS=", 13) == 0) {
+                        snprintf(addr, sizeof(addr), "%s", line + 13);
+                        size_t alen = strlen(addr);
+                        while (alen > 0 && (addr[alen - 1] == '\n' || addr[alen - 1] == '\r')) {
+                            addr[--alen] = '\0';
+                        }
+                    } else if (strncmp(line, "IBUS_DAEMON_PID=", 16) == 0) {
+                        pid = atol(line + 16);
+                    }
+                }
+                fclose(fp);
+                if (addr[0] != '\0' && (pid <= 0 || kill((pid_t)pid, 0) == 0)) {
+                    g_setenv("IBUS_ADDRESS", addr, TRUE);
+                }
+            }
+        }
+    }
+
+    g_free(wayland_file);
+    g_free(x11_file);
+    g_free(bus_dir);
+}
+
 int main(int argc, char **argv) {
     prctl(PR_SET_DUMPABLE, 0);
 
@@ -1524,13 +1595,26 @@ int main(int argc, char **argv) {
     }
     g_option_context_free(context);
 
+    ensure_live_ibus_socket();
     ibus_init();
     ibus_lotus_reload_macros();
     setup_config_monitors();
     g_unix_signal_add(SIGUSR1, on_sigusr1_unix_signal, NULL);
 
-    IBusBus *bus = ibus_bus_new();
-    if (!ibus_bus_is_connected(bus)) {
+    IBusBus *bus = NULL;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        ensure_live_ibus_socket();
+        bus = ibus_bus_new();
+        if (bus && ibus_bus_is_connected(bus)) {
+            break;
+        }
+        if (bus) {
+            g_object_unref(bus);
+            bus = NULL;
+        }
+        usleep(500000);
+    }
+    if (!bus || !ibus_bus_is_connected(bus)) {
         g_warning("Cannot connect to IBus daemon!");
         return 1;
     }
