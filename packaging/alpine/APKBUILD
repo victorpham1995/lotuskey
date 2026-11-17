@@ -1,0 +1,21 @@
+# Maintainer: Victor Pham <https://github.com/victorpham1995/lotuskey>
+pkgname=ibus-lotuskey
+pkgver=2.3.0
+pkgrel=0
+pkgdesc="Vietnamese Input Method Engine for Linux (IBus / Fcitx5 / UInput)"
+url="https://github.com/victorpham1995/lotuskey"
+arch="x86_64 aarch64"
+license="MIT"
+depends="ibus python3 py3-gobject3 gtk+3.0 librsvg gcompat"
+makedepends="gcc pkgconf glib-dev ibus-dev bash"
+options="!check !strip"
+source="https://github.com/victorpham1995/lotuskey/releases/download/v$pkgver/lotuskey-$pkgver-linux-$CARCH.tar.gz"
+builddir="$srcdir/lotuskey-$pkgver-linux-$CARCH"
+
+build() {
+	bash packaging/build_binaries.sh
+}
+
+package() {
+	bash packaging/stage_install.sh "$pkgdir" /lib/udev/rules.d
+}

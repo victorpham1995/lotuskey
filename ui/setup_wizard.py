@@ -15,14 +15,19 @@ import shutil
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-_INSTALLED = os.path.abspath(__file__).startswith("/usr/share/lotuskey")
-_ENGINE_BIN   = "/usr/lib/lotuskey/ibus-engine-lotuskey" if _INSTALLED else os.path.join(BASE_DIR, "bin", "ibus-engine-lotuskey")
-_ENGINE_LIB   = "/usr/lib/lotuskey" if _INSTALLED else os.path.join(BASE_DIR, "lib")
+_IS_STAGED_SHARE = (
+    os.path.basename(BASE_DIR) == "lotuskey"
+    and os.path.basename(os.path.dirname(BASE_DIR)) == "share"
+)
+_PREFIX = os.path.dirname(os.path.dirname(BASE_DIR)) if _IS_STAGED_SHARE else "/usr"
+_INSTALLED = _IS_STAGED_SHARE and os.path.isfile(os.path.join(_PREFIX, "lib", "lotuskey", "libLotusKeyCAPI.so"))
+_ENGINE_BIN   = os.path.join(_PREFIX, "lib", "lotuskey", "ibus-engine-lotuskey") if _INSTALLED else os.path.join(BASE_DIR, "bin", "ibus-engine-lotuskey")
+_ENGINE_LIB   = os.path.join(_PREFIX, "lib", "lotuskey") if _INSTALLED else os.path.join(BASE_DIR, "lib")
 _ENGINE_INC   = os.path.join(BASE_DIR, "include")
 _ENGINE_SRC   = os.path.join(BASE_DIR, "src", "main.c")
-_SETUP_BIN    = "/usr/bin/lotuskey-setup" if _INSTALLED else os.path.join(BASE_DIR, "bin", "lotuskey-setup")
-_MENU_BIN     = "/usr/bin/lotuskey-menu"  if _INSTALLED else os.path.join(BASE_DIR, "bin", "lotuskey-menu")
-_COMP_XML_SRC = "/usr/share/ibus/component/lotuskey.xml" if _INSTALLED else os.path.join(BASE_DIR, "engine", "lotus.xml")
+_SETUP_BIN    = os.path.join(_PREFIX, "bin", "lotuskey-setup") if _INSTALLED else os.path.join(BASE_DIR, "bin", "lotuskey-setup")
+_MENU_BIN     = os.path.join(_PREFIX, "bin", "lotuskey-menu")  if _INSTALLED else os.path.join(BASE_DIR, "bin", "lotuskey-menu")
+_COMP_XML_SRC = os.path.join(_PREFIX, "share", "ibus", "component", "lotuskey.xml") if _INSTALLED else os.path.join(BASE_DIR, "engine", "lotus.xml")
 
 from config.config_manager import load_config, save_config, load_macros, set_autostart
 from config.distro_adapter import DistroAdapter
@@ -46,7 +51,7 @@ except Exception:
     IBus = None
     HAS_IBUS_GI = False
 
-CSS_DATA = b"""
+CSS_DARK = b"""
 window.wizard-window {
     background-color: #1e1e2e;
     color: #cdd6f4;
@@ -145,6 +150,107 @@ window.wizard-window {
 }
 """
 
+CSS_LIGHT = b"""
+window.wizard-window {
+    background-color: #f8f9fc;
+    color: #1e293b;
+}
+
+.sidebar-box {
+    background-color: #f1f5f9;
+    border-right: 1px solid rgba(0, 0, 0, 0.10);
+    padding: 24px 16px;
+}
+
+.wizard-title {
+    font-size: 18px;
+    font-weight: 800;
+    color: #0f172a;
+}
+
+.wizard-author {
+    font-size: 11px;
+    font-weight: 600;
+    color: #d81b60;
+    margin-top: 2px;
+}
+
+.step-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #64748b;
+    padding: 6px 12px;
+    border-radius: 6px;
+}
+
+.step-label.active {
+    background-color: rgba(216, 27, 96, 0.12);
+    color: #d81b60;
+    font-weight: 700;
+}
+
+.step-label.completed {
+    color: #15803d;
+}
+
+.content-box {
+    padding: 24px 28px;
+}
+
+.page-heading {
+    font-size: 16px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 4px;
+}
+
+.page-desc {
+    font-size: 12px;
+    color: #475569;
+    margin-bottom: 16px;
+}
+
+.card-frame {
+    background-color: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.10);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+}
+
+.status-ok {
+    color: #15803d;
+    font-weight: 600;
+}
+
+.status-warn {
+    color: #b45309;
+    font-weight: 600;
+}
+
+.status-err {
+    color: #dc2626;
+    font-weight: 600;
+}
+
+.log-view {
+    font-family: monospace;
+    font-size: 11px;
+    background-color: #f1f5f9;
+    color: #334155;
+    padding: 8px;
+    border-radius: 6px;
+}
+
+.bottom-action-bar {
+    background-color: #f1f5f9;
+    border-top: 1px solid rgba(0, 0, 0, 0.10);
+    padding: 12px 20px;
+}
+"""
+
+CSS_DATA = CSS_DARK
+
 
 def scan_system_environment(lang: str = "vi"):
     """Scans system environment, tools, and prerequisites across Linux distros."""
@@ -181,23 +287,26 @@ def scan_system_environment(lang: str = "vi"):
     })
 
     gcc_path = shutil.which("gcc") or shutil.which("clang")
-    gcc_ok = gcc_path is not None
+    has_prebuilt = DistroAdapter.check_binary_arch_compatible(_ENGINE_BIN)
+    gcc_ok = gcc_path is not None or has_prebuilt
     results.append({
         "id": "gcc",
         "name": tr(lang, "scan_gcc"),
-        "value": tr(lang, "scan_installed") if gcc_ok else tr(lang, "scan_missing"),
+        "value": tr(lang, "scan_installed") if gcc_path else ("Prebuilt Ready" if has_prebuilt else tr(lang, "scan_missing")),
         "ok": gcc_ok,
-        "detail": gcc_path if gcc_ok else DistroAdapter.get_install_hint("build")
+        "detail": gcc_path or (_ENGINE_BIN if has_prebuilt else DistroAdapter.get_install_hint("build"))
     })
 
     so_path = os.path.join(_ENGINE_LIB, "libLotusKeyCAPI.so")
     abi_ok, abi_reason = DistroAdapter.check_capi_library_compatible(so_path)
+    if not abi_ok and not _INSTALLED:
+        abi_ok, abi_reason = DistroAdapter.ensure_capi_library(BASE_DIR)
     results.append({
         "id": "lotuskey_core",
         "name": f"{tr(lang, 'scan_core')} ({distro['arch']})",
         "value": tr(lang, "scan_abi_ok") if abi_ok else abi_reason,
         "ok": abi_ok,
-        "detail": f"{os.path.getsize(so_path):,} bytes" if abi_ok else abi_reason
+        "detail": f"{os.path.getsize(so_path):,} bytes" if abi_ok and os.path.exists(so_path) else abi_reason
     })
 
     results.append({
@@ -211,14 +320,14 @@ def scan_system_environment(lang: str = "vi"):
     return results
 
 
-def run_installation_step(step_idx, emit_log):
+def run_installation_step(step_idx, emit_log, autostart=True):
     """Executes a single installation step and returns True on success."""
     try:
         if step_idx == 1:
-            emit_log("Initializing ~/.config/LotusKey and SVG icons...")
+            emit_log("Initializing ~/.config/LotusKey and flat flag SVG icons...")
             DistroAdapter.install_user_icons(BASE_DIR)
             cfg = load_config()
-            cfg["autostart"] = True
+            cfg["autostart"] = bool(autostart)
             save_config(cfg)
             emit_log("[OK] Configuration directory and icons initialized.")
             return True
@@ -242,7 +351,9 @@ def run_installation_step(step_idx, emit_log):
                 out_bin  = _ENGINE_BIN
                 lib_dir  = _ENGINE_LIB
                 inc_dir  = _ENGINE_INC
-                cc_bin   = shutil.which("gcc") or shutil.which("clang") or "cc"
+                cc_bin   = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
+                uinput_src = os.path.join(BASE_DIR, "src", "uinput_daemon.c")
+                uinput_bin = os.path.join(BASE_DIR, "bin", "lotuskey-uinput")
 
                 so0_link = os.path.join(lib_dir, "libLotusKeyCAPI.so.0")
                 if not os.path.exists(so0_link):
@@ -251,42 +362,47 @@ def run_installation_step(step_idx, emit_log):
                     except Exception:
                         pass
 
-                emit_log("Compiling IBus engine (ibus-engine-lotuskey)...")
-                cflags, ldflags = DistroAdapter.get_ibus_build_flags(BASE_DIR)
-                cmd = [
-                    cc_bin, "-O2", "-s", "-fno-ident",
-                    "-Wl,--build-id=none", "-Wl,-z,relro,-z,now",
-                    *cflags,
-                    src_file,
-                    "-Wl,-rpath,$ORIGIN",
-                    "-Wl,-rpath,$ORIGIN/../lib",
-                    "-Wl,-rpath,/usr/lib/lotuskey",
-                    *ldflags,
-                    "-o", out_bin
-                ]
-                res = subprocess.run(cmd, capture_output=True, text=True)
-                if res.returncode != 0:
-                    if os.path.isfile(out_bin) and os.access(out_bin, os.X_OK):
-                        emit_log(f"[WARN] Using prebuilt binary: {out_bin}")
-                    else:
-                        emit_log(f"[WARN] IBus engine build skipped ({res.stderr.strip()}); continuing with UInput/Fcitx5.")
-
-                uinput_src = os.path.join(BASE_DIR, "src", "uinput_daemon.c")
-                uinput_bin = os.path.join(BASE_DIR, "bin", "lotuskey-uinput")
-                if os.path.isfile(uinput_src):
-                    cmd_uinput = [
+                have_prebuilt = DistroAdapter.check_binary_arch_compatible(out_bin)
+                if have_prebuilt and (os.environ.get("LOTUSKEY_PREBUILT") == "1" or not cc_bin or not os.path.isfile(src_file)):
+                    emit_log(f"Using prebuilt binary: {out_bin}")
+                elif cc_bin and os.path.isfile(src_file):
+                    emit_log("Compiling IBus engine (ibus-engine-lotuskey)...")
+                    cflags, ldflags = DistroAdapter.get_ibus_build_flags(BASE_DIR)
+                    cmd = [
                         cc_bin, "-O2", "-s", "-fno-ident",
                         "-Wl,--build-id=none", "-Wl,-z,relro,-z,now",
-                        f"-I{inc_dir}", uinput_src,
-                        f"-L{lib_dir}",
+                        *cflags,
+                        src_file,
                         "-Wl,-rpath,$ORIGIN",
                         "-Wl,-rpath,$ORIGIN/../lib",
                         "-Wl,-rpath,/usr/lib/lotuskey",
-                        "-lLotusKeyCAPI", "-o", uinput_bin
+                        *ldflags,
+                        "-o", out_bin
                     ]
-                    subprocess.run(cmd_uinput, capture_output=True, text=True, check=False)
-                    if os.path.isfile(uinput_bin):
-                        os.chmod(uinput_bin, 0o755)
+                    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                    if res.returncode != 0:
+                        if DistroAdapter.check_binary_arch_compatible(out_bin):
+                            emit_log(f"[WARN] Using prebuilt binary: {out_bin}")
+                        else:
+                            emit_log(f"[WARN] IBus engine build skipped ({res.stderr.strip()}); continuing with UInput/Fcitx5.")
+
+                    if os.path.isfile(uinput_src) and not (DistroAdapter.check_binary_arch_compatible(uinput_bin) and os.environ.get("LOTUSKEY_PREBUILT") == "1"):
+                        cmd_uinput = [
+                            cc_bin, "-O2", "-s", "-fno-ident",
+                            "-Wl,--build-id=none", "-Wl,-z,relro,-z,now",
+                            f"-I{inc_dir}", uinput_src,
+                            f"-L{lib_dir}",
+                            "-Wl,-rpath,$ORIGIN",
+                            "-Wl,-rpath,$ORIGIN/../lib",
+                            "-Wl,-rpath,/usr/lib/lotuskey",
+                            "-lLotusKeyCAPI", "-o", uinput_bin
+                        ]
+                        subprocess.run(cmd_uinput, capture_output=True, text=True, check=False)
+                        if os.path.isfile(uinput_bin):
+                            os.chmod(uinput_bin, 0o755)
+                else:
+                    emit_log("[ERR] No C compiler or prebuilt binary available.")
+                    return False
 
                 if os.path.isfile(out_bin):
                     legacy_bin = os.path.join(BASE_DIR, "bin", "ibus-engine-lotus")
@@ -329,7 +445,7 @@ def run_installation_step(step_idx, emit_log):
             emit_log("Creating desktop entry and CLI symlinks...")
             if _INSTALLED:
                 subprocess.run(
-                    ["update-desktop-database", "-q", "/usr/share/applications/"],
+                    ["update-desktop-database", "-q", os.path.join(_PREFIX, "share", "applications")],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
                 emit_log("[OK] Desktop shortcuts verified.")
@@ -337,18 +453,30 @@ def run_installation_step(step_idx, emit_log):
             else:
                 local_bin = os.path.expanduser("~/.local/bin")
                 os.makedirs(local_bin, exist_ok=True)
-                setup_src = _SETUP_BIN
-                menu_src  = _MENU_BIN
+                setup_src  = _SETUP_BIN
+                menu_src   = _MENU_BIN
+                auto_src   = os.path.join(BASE_DIR, "bin", "lotuskey-autostart")
+                uinput_src = os.path.join(BASE_DIR, "bin", "lotuskey-uinput")
+                wizard_src = os.path.join(BASE_DIR, "bin", "lotuskey-wizard")
 
-                for src in (setup_src, menu_src):
+                for src in (setup_src, menu_src, auto_src, uinput_src, wizard_src):
                     if os.path.exists(src):
                         os.chmod(src, 0o755)
 
-                for target, link_name in [
+                links = [
                     (setup_src, os.path.join(local_bin, "lotuskey")),
                     (setup_src, os.path.join(local_bin, "lotuskey-setup")),
                     (menu_src,  os.path.join(local_bin, "lotuskey-menu")),
-                ]:
+                ]
+                for opt_src, opt_name in (
+                    (auto_src, "lotuskey-autostart"),
+                    (uinput_src, "lotuskey-uinput"),
+                    (wizard_src, "lotuskey-wizard"),
+                ):
+                    if os.path.exists(opt_src):
+                        links.append((opt_src, os.path.join(local_bin, opt_name)))
+
+                for target, link_name in links:
                     if os.path.exists(link_name) or os.path.islink(link_name):
                         os.remove(link_name)
                     os.symlink(target, link_name)
@@ -377,19 +505,28 @@ def run_installation_step(step_idx, emit_log):
 
         elif step_idx == 5:
             emit_log("Configuring OS autostart...")
-            set_autostart(True)
-            emit_log("[OK] Autostart entry written to ~/.config/autostart/lotuskey.desktop.")
+            cfg = load_config()
+            cfg["autostart"] = bool(autostart)
+            save_config(cfg)
+            set_autostart(bool(autostart), cfg.get("im_framework", "auto"))
+            if autostart:
+                emit_log("[OK] Autostart entry written to ~/.config/autostart/lotuskey.desktop.")
+            else:
+                emit_log("[OK] Autostart disabled per user preference.")
             return True
 
         elif step_idx == 6:
             emit_log("Synchronizing input method framework and activating engine...")
             cfg = load_config()
             macros = load_macros()
-            eff = apply_framework_config(cfg, macros, switch_daemon=False)
-            if eff == "ibus" and shutil.which("ibus"):
-                subprocess.run(["ibus", "restart"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                time.sleep(1.0)
-                subprocess.run(["ibus", "engine", "lotuskey"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.environ.get("LOTUSKEY_NO_DAEMON") == "1":
+                eff = resolve_effective_framework(cfg.get("im_framework", "auto"))
+            else:
+                eff = apply_framework_config(cfg, macros, switch_daemon=False)
+                if eff == "ibus" and shutil.which("ibus") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+                    subprocess.run(["ibus", "restart"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    time.sleep(1.0)
+                    subprocess.run(["ibus", "engine", "lotuskey"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             emit_log(f"[OK] LotusKey activated (Backend: {eff.upper()}).")
             return True
 
@@ -434,7 +571,8 @@ def run_silent_setup():
         print("\n" + "=" * 64)
         print(tr(lang, "wiz_finish_head"))
         print("=" * 64)
-        subprocess.Popen([_SETUP_BIN])
+        if "--open-settings" in sys.argv and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            subprocess.Popen([_SETUP_BIN])
         return 0
     return 1
 
@@ -449,10 +587,31 @@ class SetupWizard(Gtk.Window):
         self.set_resizable(False)
         self._updating_ui = False
         self.current_page = 0
+        self._autostart_pref = bool(self.cfg.get("autostart", True))
+        self._open_cfg_pref = True
+
+        theme_mode = str(self.cfg.get("theme", "auto")).lower()
+        settings = Gtk.Settings.get_default()
+        if theme_mode == "dark":
+            use_dark = True
+            if settings:
+                settings.set_property("gtk-application-prefer-dark-theme", True)
+        elif theme_mode == "light":
+            use_dark = False
+            if settings:
+                settings.set_property("gtk-application-prefer-dark-theme", False)
+        else:
+            prefer_dark = False
+            if settings:
+                prefer_dark = bool(settings.get_property("gtk-application-prefer-dark-theme"))
+                tname = str(settings.get_property("gtk-theme-name") or "").lower()
+                if "dark" in tname:
+                    prefer_dark = True
+            use_dark = prefer_dark
 
         screen = Gdk.Screen.get_default()
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS_DATA)
+        provider.load_from_data(CSS_DARK if use_dark else CSS_LIGHT)
         Gtk.StyleContext.add_provider_for_screen(screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.get_style_context().add_class("wizard-window")
 
@@ -557,6 +716,10 @@ class SetupWizard(Gtk.Window):
     def _on_lang_changed(self, combo):
         if self._updating_ui or self.current_page == 2:
             return
+        if hasattr(self, "chk_autostart_welcome"):
+            self._autostart_pref = self.chk_autostart_welcome.get_active()
+        if hasattr(self, "chk_open_config_welcome"):
+            self._open_cfg_pref = self.chk_open_config_welcome.get_active()
         new_lang = normalize_lang(combo.get_active_id())
         if new_lang != self.lang:
             self.lang = new_lang
@@ -585,14 +748,23 @@ class SetupWizard(Gtk.Window):
         page.pack_start(card, False, False, 0)
 
         self.chk_autostart_welcome = Gtk.CheckButton(label=self._t("wiz_chk_autostart"))
-        self.chk_autostart_welcome.set_active(True)
+        self.chk_autostart_welcome.set_active(self._autostart_pref)
+        self.chk_autostart_welcome.connect(
+            "toggled", lambda w: setattr(self, "_autostart_pref", w.get_active())
+        )
         page.pack_start(self.chk_autostart_welcome, False, False, 4)
 
         self.chk_open_config_welcome = Gtk.CheckButton(label=self._t("wiz_chk_open_cfg"))
-        self.chk_open_config_welcome.set_active(True)
+        self.chk_open_config_welcome.set_active(self._open_cfg_pref)
+        self.chk_open_config_welcome.connect("toggled", self._on_open_cfg_welcome_toggled)
         page.pack_start(self.chk_open_config_welcome, False, False, 4)
 
         self.stack.add_named(page, "page_welcome")
+
+    def _on_open_cfg_welcome_toggled(self, chk):
+        self._open_cfg_pref = chk.get_active()
+        if hasattr(self, "chk_open_config_finish"):
+            self.chk_open_config_finish.set_active(self._open_cfg_pref)
 
     def _build_scan_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -704,7 +876,10 @@ class SetupWizard(Gtk.Window):
         page.pack_start(card, False, False, 0)
 
         self.chk_open_config_finish = Gtk.CheckButton(label=self._t("wiz_chk_open_now"))
-        self.chk_open_config_finish.set_active(True)
+        self.chk_open_config_finish.set_active(self._open_cfg_pref)
+        self.chk_open_config_finish.connect(
+            "toggled", lambda w: setattr(self, "_open_cfg_pref", w.get_active())
+        )
         page.pack_start(self.chk_open_config_finish, False, False, 4)
 
         self.stack.add_named(page, "page_finish")
@@ -776,23 +951,37 @@ class SetupWizard(Gtk.Window):
         ]
 
         total_steps = len(steps)
+        autostart_val = bool(self._autostart_pref)
         for idx, name in steps:
             def _update_status(s_name=name, i=idx):
-                self.lbl_install_status.set_text(f"({i}/{total_steps}) {s_name}...")
+                self.lbl_install_status.set_text(
+                    tr(self.lang, "wiz_inst_running", i=i, total=total_steps, name=s_name)
+                )
                 self.progress_bar.set_fraction((i - 1) / total_steps)
             GLib.idle_add(_update_status)
 
-            ok = run_installation_step(idx, self._append_log)
+            ok = run_installation_step(idx, self._append_log, autostart=autostart_val)
             time.sleep(0.25)
 
             def _mark_done(i=idx, success=ok):
                 sym = "✔" if success else "✖"
                 raw = self.install_step_labels[i - 1].get_text()[2:]
                 self.install_step_labels[i - 1].set_text(f"{sym} {raw}")
-                self.progress_bar.set_fraction(i / total_steps)
+                if success:
+                    self.progress_bar.set_fraction(i / total_steps)
             GLib.idle_add(_mark_done)
 
+            if not ok:
+                def _on_fail():
+                    self.lbl_install_status.set_text(self._t("wiz_inst_fail"))
+                    self.btn_back.set_sensitive(True)
+                    self.btn_cancel.set_sensitive(True)
+                    self.btn_next.set_label(self._t("wiz_btn_install"))
+                GLib.idle_add(_on_fail)
+                return
+
         def _finish():
+            self.lbl_install_status.set_text(self._t("wiz_inst_done"))
             self.current_page = 3
             self._update_ui_state()
         GLib.idle_add(_finish)

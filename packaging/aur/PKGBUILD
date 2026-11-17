@@ -1,0 +1,29 @@
+# Maintainer: Victor Pham <https://github.com/victorpham1995/lotuskey>
+pkgname=ibus-lotuskey-bin
+_pkgname=ibus-lotuskey
+pkgver=2.3.0
+pkgrel=1
+pkgdesc="Vietnamese Input Method Engine for Linux (IBus / Fcitx5 / UInput) - Prebuilt Binary"
+arch=('x86_64' 'aarch64')
+url="https://github.com/victorpham1995/lotuskey"
+license=('MIT')
+provides=('ibus-lotuskey')
+conflicts=('ibus-lotuskey')
+depends=('ibus' 'glib2' 'gtk3' 'librsvg' 'python' 'python-gobject')
+optdepends=(
+    'fcitx5: Fcitx5 Input Method Framework support'
+    'wtype: Wayland UInput daemon support'
+    'xdotool: X11 UInput daemon support'
+)
+backup=('etc/xdg/autostart/lotuskey.desktop')
+options=('!strip' '!debug')
+install=ibus-lotuskey.install
+source_x86_64=("${url}/releases/download/v${pkgver}/lotuskey-${pkgver}-linux-x86_64.tar.gz")
+source_aarch64=("${url}/releases/download/v${pkgver}/lotuskey-${pkgver}-linux-aarch64.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    cd "${srcdir}/lotuskey-${pkgver}-linux-${CARCH}"
+    bash packaging/stage_install.sh "${pkgdir}" /usr/lib/udev/rules.d
+}

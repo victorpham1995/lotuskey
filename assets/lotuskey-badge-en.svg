@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Flat E Badge (UniKey / EVKey style, pure vector path) -->
+  <rect x="4" y="4" width="56" height="56" rx="12" fill="#1976D2"/>
+  <path d="M19 14 H45 V21.5 H27 V28.2 H42.5 V35.5 H27 V42.5 H45.5 V50 H19 Z" fill="#FFFFFF"/>
+  <rect x="4.75" y="4.75" width="54.5" height="54.5" rx="11.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.2" stroke-width="1.5"/>
+</svg>

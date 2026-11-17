@@ -46,6 +46,8 @@ typedef struct {
     bool w2u;
     bool bracket_transform;
     bool macro_enabled;
+    bool auto_capitalize_macro;
+    int restore_key_mode; /* 0: esc, 1: shift_backspace, 2: none */
     int charset;
     bool shift_down;
     bool ctrl_down;
@@ -115,6 +117,12 @@ static void load_daemon_config(UInputEngineState *st) {
             st->bracket_transform = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         } else if (strncmp(line, "MACRO_ENABLED=", 14) == 0) {
             st->macro_enabled = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "AUTO_CAPITALIZE_MACRO=", 22) == 0) {
+            st->auto_capitalize_macro = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "RESTORE_KEY=", 12) == 0) {
+            if (strstr(line, "shift_backspace")) st->restore_key_mode = 1;
+            else if (strstr(line, "none") || strstr(line, "None")) st->restore_key_mode = 2;
+            else st->restore_key_mode = 0;
         } else if (strncmp(line, "CHARSET=", 8) == 0) {
             const char *p = line + 8;
             while (*p == '"' || *p == '\'' || *p == ' ') p++;
@@ -366,6 +374,8 @@ int main(int argc, char **argv) {
     st.w2u = true;
     st.bracket_transform = true;
     st.macro_enabled = true;
+    st.auto_capitalize_macro = true;
+    st.restore_key_mode = 0;
     load_daemon_config(&st);
     g_reload_requested = 0;
 
@@ -434,6 +444,26 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                bool trigger_restore =
+                    (st.restore_key_mode == 0 && ev.code == KEY_ESC) ||
+                    (st.restore_key_mode == 1 && ev.code == KEY_BACKSPACE && st.shift_down);
+
+                if (trigger_restore && lotuskey_is_composing(st.session)) {
+                    const char *raw = lotuskey_get_raw_text(st.session);
+                    if (raw && raw[0] != '\0') {
+                        char prev_conv[1024];
+                        lotus_convert_charset(st.prev_composed, st.charset, prev_conv, sizeof(prev_conv));
+                        if (strcmp(prev_conv, raw) != 0) {
+                            size_t del_n = utf8_cp_len(prev_conv);
+                            emit_backspaces(ufd, del_n);
+                            inject_utf8_text(raw);
+                        }
+                    }
+                    lotuskey_reset_session(st.session);
+                    st.prev_composed[0] = '\0';
+                    continue;
+                }
+
                 if (ev.code == KEY_BACKSPACE) {
                     if (lotuskey_is_composing(st.session)) {
                         lotuskey_feed_backspace(st.session);
@@ -458,11 +488,16 @@ int main(int argc, char **argv) {
                     if (ch == ' ' && st.macro_enabled && lotuskey_is_composing(st.session)) {
                         const char *comp = lotuskey_get_composing_text(st.session);
                         char expanded[512];
-                        if (comp && lotus_macro_lookup(&g_macros, comp, expanded, sizeof(expanded))) {
-                            size_t del_n = utf8_cp_len(comp) + 1; /* +1 for space */
+                        int auto_cap = st.auto_capitalize_macro ? 1 : 0;
+                        if (comp && lotus_macro_lookup_ex(&g_macros, comp, auto_cap, expanded, sizeof(expanded))) {
+                            char prev_conv[1024];
+                            char exp_conv[1024];
+                            lotus_convert_charset(comp, st.charset, prev_conv, sizeof(prev_conv));
+                            lotus_convert_charset(expanded, st.charset, exp_conv, sizeof(exp_conv));
+                            size_t del_n = utf8_cp_len(prev_conv) + 1; /* +1 for space */
                             emit_backspaces(ufd, del_n);
-                            char final_str[520];
-                            snprintf(final_str, sizeof(final_str), "%s ", expanded);
+                            char final_str[1032];
+                            snprintf(final_str, sizeof(final_str), "%s ", exp_conv);
                             inject_utf8_text(final_str);
                         }
                     }
@@ -478,15 +513,27 @@ int main(int argc, char **argv) {
                 const char *curr = lotuskey_get_composing_text(st.session);
                 if (!curr) curr = "";
 
-                /* Only replace if Vietnamese diacritics were formed (curr != prev_buf + ch) */
+                /* Only replace changed suffix if Vietnamese diacritics were formed (curr != prev_buf + ch) */
                 char naive[520];
                 snprintf(naive, sizeof(naive), "%s%c", prev_buf, ch);
                 if (strcmp(curr, naive) != 0) {
-                    size_t del_n = utf8_cp_len(prev_buf) + 1; /* +1 for raw key just typed */
+                    char prev_conv[1024];
+                    char curr_conv[1024];
+                    lotus_convert_charset(prev_buf, st.charset, prev_conv, sizeof(prev_conv));
+                    lotus_convert_charset(curr, st.charset, curr_conv, sizeof(curr_conv));
+
+                    size_t common_bytes = 0;
+                    while (prev_conv[common_bytes] != '\0' && curr_conv[common_bytes] != '\0' &&
+                           prev_conv[common_bytes] == curr_conv[common_bytes]) {
+                        common_bytes++;
+                    }
+                    while (common_bytes > 0 && ((unsigned char)curr_conv[common_bytes] & 0xC0) == 0x80) {
+                        common_bytes--;
+                    }
+
+                    size_t del_n = utf8_cp_len(prev_conv + common_bytes) + 1; /* +1 for raw key just typed */
                     emit_backspaces(ufd, del_n);
-                    char converted[1024];
-                    lotus_convert_charset(curr, st.charset, converted, sizeof(converted));
-                    inject_utf8_text(converted);
+                    inject_utf8_text(curr_conv + common_bytes);
                 }
                 snprintf(st.prev_composed, sizeof(st.prev_composed), "%s", curr);
             }

@@ -6,8 +6,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 VERSION="$(cat "$SCRIPT_DIR/VERSION")"
+ARCH="${ARCH:-$(uname -m)}"
+case "$ARCH" in
+    aarch64|arm64|armv8*) ARCH="aarch64" ;;
+    x86_64|amd64|x64)     ARCH="x86_64" ;;
+esac
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/dist}"
-NAME="lotuskey-${VERSION}-linux-x86_64"
+NAME="lotuskey-${VERSION}-linux-${ARCH}"
 WORK_DIR="$(mktemp -d)"
 
 echo "=== Building generic tarball: ${NAME}.tar.gz ==="
@@ -15,9 +20,11 @@ echo "=== Building generic tarball: ${NAME}.tar.gz ==="
 
 mkdir -p "$WORK_DIR/$NAME"
 cd "$ROOT_DIR"
-git ls-files -z 2>/dev/null | xargs -0 -I{} cp --parents -a {} "$WORK_DIR/$NAME/" 2>/dev/null || \
-    cp -a assets bin config engine include lib packaging src ui install.sh setup.sh README.md "$WORK_DIR/$NAME/"
-cp -a bin/ibus-engine-lotuskey bin/lotuskey-uinput "$WORK_DIR/$NAME/bin/"
+cp -a assets bin config engine include lib packaging src ui install.sh setup.sh README.md "$WORK_DIR/$NAME/"
+if [ -f "$ROOT_DIR/flake.nix" ]; then
+    cp -a "$ROOT_DIR/flake.nix" "$WORK_DIR/$NAME/"
+fi
+cp -a bin/ibus-engine-lotuskey bin/lotuskey-uinput bin/lotuskey-autostart "$WORK_DIR/$NAME/bin/"
 find "$WORK_DIR/$NAME" -name '__pycache__' -prune -exec rm -rf {} +
 
 mkdir -p "$OUT_DIR"

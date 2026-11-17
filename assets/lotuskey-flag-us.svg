@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Flat US Micro-Flag (No wave distortion, simplified stripes for 16x16..64x64 clarity) -->
+  <defs>
+    <clipPath id="usFlatClip">
+      <rect x="2" y="10" width="60" height="44" rx="6"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#usFlatClip)">
+    <rect x="2" y="10" width="60" height="44" fill="#FFFFFF"/>
+    <!-- 4 bold red stripes + 3 white stripes -->
+    <rect x="2" y="10" width="60" height="6.3" fill="#B22234"/>
+    <rect x="2" y="22.5" width="60" height="6.3" fill="#B22234"/>
+    <rect x="2" y="35.1" width="60" height="6.3" fill="#B22234"/>
+    <rect x="2" y="47.7" width="60" height="6.3" fill="#B22234"/>
+    <!-- Navy blue canton -->
+    <rect x="2" y="10" width="28" height="25.1" fill="#3C3B6E"/>
+    <!-- Crisp star dots inside canton -->
+    <g fill="#FFFFFF">
+      <circle cx="8.5" cy="15.5" r="1.7"/>
+      <circle cx="16.0" cy="15.5" r="1.7"/>
+      <circle cx="23.5" cy="15.5" r="1.7"/>
+      <circle cx="12.2" cy="22.5" r="1.7"/>
+      <circle cx="19.8" cy="22.5" r="1.7"/>
+      <circle cx="8.5" cy="29.5" r="1.7"/>
+      <circle cx="16.0" cy="29.5" r="1.7"/>
+      <circle cx="23.5" cy="29.5" r="1.7"/>
+    </g>
+  </g>
+  <rect x="2.75" y="10.75" width="58.5" height="42.5" rx="5.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1.5"/>
+</svg>

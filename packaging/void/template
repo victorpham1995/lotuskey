@@ -1,0 +1,25 @@
+# Template file for 'ibus-lotuskey' (Void Linux xbps-src)
+pkgname=ibus-lotuskey
+version=2.3.0
+revision=1
+archs="x86_64 aarch64"
+hostmakedepends="pkg-config python3"
+makedepends="glib-devel ibus-devel"
+depends="ibus python3 python3-gobject gtk+3 librsvg"
+short_desc="Vietnamese Input Method Engine for Linux (IBus / Fcitx5 / UInput)"
+maintainer="Victor Pham <https://github.com/victorpham1995/lotuskey>"
+license="MIT"
+homepage="https://github.com/victorpham1995/lotuskey"
+distfiles="https://github.com/victorpham1995/lotuskey/releases/download/v${version}/lotuskey-${version}-linux-${XBPS_TARGET_MACHINE%-musl}.tar.gz"
+checksum=SKIP
+conf_files="/etc/xdg/autostart/lotuskey.desktop"
+nopie=yes
+nostrip=yes
+
+do_build() {
+	bash packaging/build_binaries.sh
+}
+
+do_install() {
+	bash packaging/stage_install.sh "${DESTDIR}" /usr/lib/udev/rules.d
+}

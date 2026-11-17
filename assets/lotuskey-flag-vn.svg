@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Flat Vietnamese Flag (No wave distortion, crisp at 16x16..64x64) -->
+  <rect x="2" y="10" width="60" height="44" rx="6" fill="#DA251D"/>
+  <!-- Centered 5-pointed yellow star in pure vector path -->
+  <path d="M32 17.5 L35.26 27.52 L45.79 27.52 L37.27 33.71 L40.52 43.73 L32 37.54 L23.48 43.73 L26.73 33.71 L18.21 27.52 L28.74 27.52 Z" fill="#FFD600"/>
+  <!-- Crisp flat border -->
+  <rect x="2.75" y="10.75" width="58.5" height="42.5" rx="5.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1.5"/>
+</svg>

@@ -1,0 +1,31 @@
+app-id: org.freedesktop.IBus.LotusKey
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+command: lotuskey-setup
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=all
+  - --talk-name=org.freedesktop.IBus
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.freedesktop.IBus.LotusKey
+  - --filesystem=xdg-config/LotusKey:create
+  - --filesystem=xdg-config/fcitx5:create
+  - --filesystem=xdg-config/ibus:ro
+
+modules:
+  - name: lotuskey
+    buildsystem: simple
+    build-commands:
+      - bash packaging/build_binaries.sh
+      - PREFIX=/app ETCDIR=/app/etc bash packaging/stage_install.sh / /app/lib/udev/rules.d
+      - install -Dm644 packaging/stage_install.sh /app/share/lotuskey/stage_install.sh
+      - mv /app/share/applications/lotuskey-setup.desktop /app/share/applications/org.freedesktop.IBus.LotusKey.desktop
+      - sed -i 's|^Icon=lotuskey$|Icon=org.freedesktop.IBus.LotusKey|' /app/share/applications/org.freedesktop.IBus.LotusKey.desktop
+      - cp /app/share/icons/hicolor/scalable/apps/lotuskey.svg /app/share/icons/hicolor/scalable/apps/org.freedesktop.IBus.LotusKey.svg
+    sources:
+      - type: dir
+        path: ../..

@@ -1,6 +1,7 @@
 post_install() {
     ibus write-cache --system >/dev/null 2>&1 || true
     udevadm control --reload-rules >/dev/null 2>&1 || true
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
 }
 
 post_upgrade() {
@@ -9,4 +10,5 @@ post_upgrade() {
 
 post_remove() {
     ibus write-cache --system >/dev/null 2>&1 || true
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
 }

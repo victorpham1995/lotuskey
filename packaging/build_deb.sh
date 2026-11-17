@@ -5,7 +5,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 VERSION="$(cat "$SCRIPT_DIR/VERSION")"
-ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+if [ -z "${ARCH:-}" ]; then
+    ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+fi
+case "$ARCH" in
+    aarch64|arm64|armv8*) ARCH="arm64" ;;
+    x86_64|amd64|x64)     ARCH="amd64" ;;
+esac
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/dist}"
 PKG_NAME="ibus-lotuskey_${VERSION}_${ARCH}"
 BUILD_DIR="$(mktemp -d)/${PKG_NAME}"
@@ -21,14 +27,18 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${ARCH}
-Depends: ibus, libibus-1.0-5, libc6 (>= 2.35), libglib2.0-0 | libglib2.0-0t64, python3, python3-gi, gir1.2-gtk-3.0
-Recommends: gir1.2-ibus-1.0
-Suggests: fcitx5
+Depends: ibus, libibus-1.0-5, libc6 (>= 2.35), libglib2.0-0 | libglib2.0-0t64, python3, python3-gi, gir1.2-gtk-3.0, gir1.2-gdkpixbuf-2.0, librsvg2-common
+Recommends: gir1.2-ibus-1.0, libnotify-bin
+Suggests: fcitx5, wtype, xdotool, gnome-shell-extension-appindicator
 Maintainer: Victor Pham <https://github.com/victorpham1995/lotuskey>
 Homepage: https://github.com/victorpham1995/lotuskey
 Description: LotusKey Vietnamese Input Method for Linux
  Supports IBus Native C Engine, Fcitx5, Fcitx4, and UInput Kernel Daemon
  with bilingual (Vietnamese/English) user interface.
+EOF
+
+cat > "$BUILD_DIR/DEBIAN/conffiles" << 'EOF'
+/etc/xdg/autostart/lotuskey.desktop
 EOF
 
 cat > "$BUILD_DIR/DEBIAN/postinst" << 'EOF'

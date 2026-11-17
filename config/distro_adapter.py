@@ -232,6 +232,50 @@ class DistroAdapter:
                 break
         return [f"-I{p}" for p in inc]
 
+    ELF_MACHINE_MAP = {
+        "x86_64": 62,       # EM_X86_64
+        "aarch64": 183,     # EM_AARCH64
+        "riscv64": 243,     # EM_RISCV
+        "armv7l": 40,       # EM_ARM
+        "ppc64le": 21,      # EM_PPC64
+        "loongarch64": 258, # EM_LOONGARCH
+    }
+
+    @staticmethod
+    def normalize_arch(arch: Optional[str] = None) -> str:
+        raw = (arch or platform.machine() or "").strip().lower()
+        if raw in ("aarch64", "arm64", "armv8b", "armv8l"):
+            return "aarch64"
+        if raw in ("x86_64", "amd64", "x64"):
+            return "x86_64"
+        return raw
+
+    @staticmethod
+    def get_elf_machine(path: str) -> Optional[int]:
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                hdr = f.read(20)
+            if len(hdr) < 20 or hdr[:4] != b"\x7fELF":
+                return None
+            return int.from_bytes(hdr[18:20], byteorder="little" if hdr[5] == 1 else "big")
+        except OSError:
+            return None
+
+    @classmethod
+    def check_binary_arch_compatible(cls, bin_path: str, target_arch: Optional[str] = None) -> bool:
+        if not os.path.isfile(bin_path) or not os.access(bin_path, os.X_OK):
+            return False
+        em = cls.get_elf_machine(bin_path)
+        if em is None:
+            return False
+        norm = cls.normalize_arch(target_arch)
+        expected = cls.ELF_MACHINE_MAP.get(norm)
+        if expected is not None:
+            return em == expected
+        return True
+
     @staticmethod
     def check_capi_library_compatible(so_path: str) -> Tuple[bool, str]:
         if not os.path.exists(so_path):
@@ -245,33 +289,171 @@ class DistroAdapter:
             return False, str(e)
 
     @classmethod
-    def ensure_capi_library(cls, root_dir: str) -> Tuple[bool, str]:
-        so_path = os.path.join(root_dir, "lib", "libLotusKeyCAPI.so")
-        return cls.check_capi_library_compatible(so_path)
+    def build_capi_library(cls, root_dir: str, cc_bin: Optional[str] = None) -> Tuple[bool, str]:
+        capi_src = os.path.join(root_dir, "src", "capi", "lotuskey_capi.c")
+        if not os.path.isfile(capi_src):
+            return False, f"Missing C-ABI source file: {capi_src}"
 
-    @staticmethod
-    def install_user_icons(root_dir: str) -> None:
+        compiler = (
+            cc_bin
+            or os.environ.get("CC")
+            or shutil.which("gcc")
+            or shutil.which("clang")
+            or shutil.which("cc")
+        )
+        if not compiler:
+            return False, "No C compiler (gcc/clang/cc) found to build libLotusKeyCAPI.so"
+
+        lib_dir = os.path.join(root_dir, "lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        so_path = os.path.join(lib_dir, "libLotusKeyCAPI.so")
+        tmp_so = f"{so_path}.tmp.{os.getpid()}"
+        inc_dir = os.path.join(root_dir, "include")
+
+        cmd = [
+            compiler,
+            "-O2", "-s", "-fno-ident", "-fPIC", "-shared",
+            "-Wall", "-Wextra",
+            "-Wl,--build-id=none", "-Wl,-z,relro,-z,now",
+            "-Wl,-soname,libLotusKeyCAPI.so.0",
+            f"-I{inc_dir}",
+            capi_src,
+            "-o", tmp_so,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0 or not os.path.isfile(tmp_so):
+            try:
+                if os.path.exists(tmp_so):
+                    os.remove(tmp_so)
+            except OSError:
+                pass
+            return False, f"Failed to compile libLotusKeyCAPI.so: {res.stderr.strip()}"
+
+        os.chmod(tmp_so, 0o755)
+        os.replace(tmp_so, so_path)
+        so0_link = os.path.join(lib_dir, "libLotusKeyCAPI.so.0")
+        try:
+            if os.path.exists(so0_link) or os.path.islink(so0_link):
+                os.remove(so0_link)
+            os.symlink("libLotusKeyCAPI.so", so0_link)
+        except OSError:
+            pass
+        return True, f"Compiled libLotusKeyCAPI.so from source ({cls.normalize_arch()})"
+
+    @classmethod
+    def ensure_capi_library(cls, root_dir: str) -> Tuple[bool, str]:
+        lib_dir = os.path.join(root_dir, "lib")
+        so_path = os.path.join(lib_dir, "libLotusKeyCAPI.so")
+        norm_arch = cls.normalize_arch()
+
+        if os.environ.get("BUILD_CAPI_FROM_SOURCE") == "1":
+            built_ok, built_msg = cls.build_capi_library(root_dir)
+            if built_ok:
+                ok, reason = cls.check_capi_library_compatible(so_path)
+                if ok:
+                    return True, built_msg
+                return False, reason
+            return False, built_msg
+
+        ok, reason = cls.check_capi_library_compatible(so_path)
+        if ok:
+            so0_link = os.path.join(lib_dir, "libLotusKeyCAPI.so.0")
+            if not os.path.exists(so0_link):
+                try:
+                    os.symlink("libLotusKeyCAPI.so", so0_link)
+                except OSError:
+                    pass
+            return True, "OK"
+
+        # Incompatible or missing (e.g. x86_64 .so on aarch64 host): compile from source first
+        built_ok, built_msg = cls.build_capi_library(root_dir)
+        if built_ok:
+            ok2, _ = cls.check_capi_library_compatible(so_path)
+            if ok2:
+                return True, built_msg
+
+        # Fallback to architecture-specific prebuilt library if available
+        arch_prebuilt = os.path.join(lib_dir, f"libLotusKeyCAPI-{norm_arch}.so")
+        if os.path.isfile(arch_prebuilt):
+            try:
+                shutil.copy2(arch_prebuilt, so_path)
+                os.chmod(so_path, 0o755)
+                ok3, _ = cls.check_capi_library_compatible(so_path)
+                if ok3:
+                    return True, f"Activated prebuilt libLotusKeyCAPI-{norm_arch}.so"
+            except OSError:
+                pass
+
+        return False, reason
+
+    ICON_FILES = (
+        "lotuskey.svg",
+        "lotuskey-off.svg",
+        "lotuskey-flag-vn.svg",
+        "lotuskey-flag-us.svg",
+        "lotuskey-flag-uk.svg",
+        "lotuskey-badge-vn.svg",
+        "lotuskey-badge-en.svg",
+        "lotuskey-symbolic.svg",
+        "lotuskey-off-symbolic.svg",
+    )
+
+    @classmethod
+    def install_user_icons(cls, root_dir: str) -> None:
         assets_dir = os.path.join(root_dir, "assets")
         target_dir = os.path.expanduser("~/.local/share/icons/hicolor/scalable/apps")
         try:
             os.makedirs(target_dir, exist_ok=True)
-            on_svg = os.path.join(assets_dir, "lotuskey.svg")
-            off_svg = os.path.join(assets_dir, "lotuskey-off.svg")
-            if os.path.exists(on_svg):
-                shutil.copy2(on_svg, os.path.join(target_dir, "lotuskey.svg"))
-            if os.path.exists(off_svg):
-                shutil.copy2(off_svg, os.path.join(target_dir, "lotuskey-off.svg"))
+            for fname in cls.ICON_FILES:
+                src_svg = os.path.join(assets_dir, fname)
+                if os.path.exists(src_svg):
+                    shutil.copy2(src_svg, os.path.join(target_dir, fname))
         except OSError:
             pass
 
     @staticmethod
-    def get_icon_path(active: bool = True) -> str:
-        user_icon = os.path.expanduser(
-            f"~/.local/share/icons/hicolor/scalable/apps/{'lotuskey.svg' if active else 'lotuskey-off.svg'}"
-        )
+    def resolve_icon_filename(active: bool = True, icon_style: str = "flag", flag_variant: str = "us") -> str:
+        style = (icon_style or "flag").lower()
+        variant = (flag_variant or "us").lower()
+        if style == "badge":
+            return "lotuskey-badge-vn.svg" if active else "lotuskey-badge-en.svg"
+        if style == "lotus":
+            return "lotuskey.svg" if active else "lotuskey-off.svg"
+        if style == "symbolic":
+            return "lotuskey-symbolic.svg" if active else "lotuskey-off-symbolic.svg"
+        if active:
+            return "lotuskey-flag-vn.svg"
+        return "lotuskey-flag-uk.svg" if variant == "uk" else "lotuskey-flag-us.svg"
+
+    @classmethod
+    def get_status_icon_path(cls, active: bool = True, icon_style: str = "flag", flag_variant: str = "us") -> str:
+        fname = cls.resolve_icon_filename(active=active, icon_style=icon_style, flag_variant=flag_variant)
+        user_icon = os.path.expanduser(f"~/.local/share/icons/hicolor/scalable/apps/{fname}")
         if os.path.exists(user_icon):
             return user_icon
-        sys_icon = f"/usr/share/icons/hicolor/scalable/apps/{'lotuskey.svg' if active else 'lotuskey-off.svg'}"
+        sys_icon = f"/usr/share/icons/hicolor/scalable/apps/{fname}"
         if os.path.exists(sys_icon):
             return sys_icon
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        asset_icon = os.path.join(base_dir, "assets", fname)
+        if os.path.exists(asset_icon):
+            return asset_icon
+        return cls.get_icon_path(active=active)
+
+    @classmethod
+    def get_icon_path(cls, active: bool = True, icon_style: Optional[str] = None, flag_variant: str = "us") -> str:
+        if icon_style:
+            return cls.get_status_icon_path(active=active, icon_style=icon_style, flag_variant=flag_variant)
+        fname = "lotuskey.svg" if active else "lotuskey-off.svg"
+        user_icon = os.path.expanduser(f"~/.local/share/icons/hicolor/scalable/apps/{fname}")
+        if os.path.exists(user_icon):
+            return user_icon
+        sys_icon = f"/usr/share/icons/hicolor/scalable/apps/{fname}"
+        if os.path.exists(sys_icon):
+            return sys_icon
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        asset_icon = os.path.join(base_dir, "assets", fname)
+        if os.path.exists(asset_icon):
+            return asset_icon
         return "input-keyboard"
+

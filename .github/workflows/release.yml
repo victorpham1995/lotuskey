@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   debian-appimage-tarball:
-    name: DEB + AppImage + Tarball (Ubuntu 22.04)
+    name: DEB + AppImage + .run + Tarball (Ubuntu 22.04)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libglib2.0-dev libibus-1.0-dev \
-            python3 dpkg-dev file desktop-file-utils
+            python3 python3-gi gir1.2-gdkpixbuf-2.0 librsvg2-common dpkg-dev file desktop-file-utils
       - name: Build binaries
         run: packaging/build_binaries.sh
       - name: Build .deb
@@ -27,9 +27,36 @@ jobs:
         run: SKIP_COMPILE=1 packaging/build_appimage.sh
       - name: Build generic tarball
         run: SKIP_COMPILE=1 packaging/build_tarball.sh
+      - name: Build self-extracting .run installer
+        run: SKIP_COMPILE=1 packaging/build_run_installer.sh
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-debian-appimage-tarball
+          path: dist/*
+
+  debian-appimage-tarball-arm64:
+    name: DEB + AppImage + .run + Tarball ARM64 (Ubuntu 24.04 ARM)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libglib2.0-dev libibus-1.0-dev \
+            python3 python3-gi gir1.2-gdkpixbuf-2.0 librsvg2-common dpkg-dev file desktop-file-utils curl
+      - name: Build binaries (ARM64)
+        run: BUILD_CAPI_FROM_SOURCE=1 packaging/build_binaries.sh
+      - name: Build .deb (arm64)
+        run: SKIP_COMPILE=1 packaging/build_deb.sh
+      - name: Build AppImage (aarch64)
+        run: SKIP_COMPILE=1 packaging/build_appimage.sh
+      - name: Build generic tarball (aarch64)
+        run: SKIP_COMPILE=1 packaging/build_tarball.sh
+      - name: Build self-extracting .run installer (aarch64)
+        run: SKIP_COMPILE=1 packaging/build_run_installer.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-debian-appimage-tarball-arm64
           path: dist/*
 
   fedora-rpm:
@@ -76,10 +103,11 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install build dependencies
-        run: pacman -Syu --noconfirm --needed base-devel git python glib2 ibus gtk3 python-gobject
+        run: pacman -Syu --noconfirm --needed base-devel git python glib2 ibus gtk3 librsvg python-gobject
       - uses: actions/checkout@v4
       - name: Build package
         run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
           useradd -m builder
           chown -R builder "$GITHUB_WORKSPACE"
           su builder -c "cd '$GITHUB_WORKSPACE/packaging' && PKGDEST='$GITHUB_WORKSPACE/dist' makepkg -f --nodeps"
@@ -91,7 +119,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [debian-appimage-tarball, fedora-rpm, opensuse-rpm, arch-pkg]
+    needs: [debian-appimage-tarball, debian-appimage-tarball-arm64, fedora-rpm, opensuse-rpm, arch-pkg]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

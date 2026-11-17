@@ -1,0 +1,56 @@
+name: lotuskey
+base: core22
+version: '2.3.0'
+summary: Vietnamese Input Method Engine for Linux (IBus / Fcitx5 / UInput)
+description: |
+  LotusKey is a high-performance native Vietnamese input method engine for Linux
+  supporting Wayland and X11 across GNOME, KDE Plasma, XFCE, Cinnamon, MATE,
+  Hyprland, Sway, Cosmic, and standalone Window Managers.
+  Includes Telex, VNI, Telex+VNI, Unicode/TCVN3/VNI-Windows charsets, and smart macros.
+
+grade: stable
+confinement: classic
+license: MIT
+
+architectures:
+  - build-on: [amd64]
+    build-for: [amd64]
+  - build-on: [arm64]
+    build-for: [arm64]
+
+apps:
+  lotuskey:
+    command: usr/bin/lotuskey-setup
+    desktop: usr/share/applications/lotuskey-setup.desktop
+  setup:
+    command: usr/bin/lotuskey-setup
+  menu:
+    command: usr/bin/lotuskey-menu
+  wizard:
+    command: usr/bin/lotuskey-wizard
+  autostart:
+    command: usr/bin/lotuskey-autostart
+  uinput:
+    command: usr/lib/lotuskey/lotuskey-uinput
+
+parts:
+  lotuskey:
+    plugin: dump
+    source: ../..
+    build-packages:
+      - build-essential
+      - pkg-config
+      - libglib2.0-dev
+      - libibus-1.0-dev
+      - python3
+    stage-packages:
+      - ibus
+      - libibus-1.0-5
+      - python3
+      - python3-gi
+      - gir1.2-gtk-3.0
+      - gir1.2-gdkpixbuf-2.0
+      - librsvg2-common
+    override-build: |
+      bash packaging/build_binaries.sh
+      bash packaging/stage_install.sh "$CRAFT_PART_INSTALL" /lib/udev/rules.d

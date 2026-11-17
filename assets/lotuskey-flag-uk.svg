@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Flat UK Union Jack Flag (No wave distortion, crisp at 16x16..64x64) -->
+  <defs>
+    <clipPath id="ukFlatClip">
+      <rect x="2" y="10" width="60" height="44" rx="6"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#ukFlatClip)">
+    <rect x="2" y="10" width="60" height="44" fill="#012169"/>
+    <!-- Diagonal saltires -->
+    <path d="M2 10 L62 54 M62 10 L2 54" stroke="#FFFFFF" stroke-width="9"/>
+    <path d="M2 10 L62 54 M62 10 L2 54" stroke="#C8102E" stroke-width="4.5"/>
+    <!-- Central cross -->
+    <path d="M32 10 V54 M2 32 H62" stroke="#FFFFFF" stroke-width="13"/>
+    <path d="M32 10 V54 M2 32 H62" stroke="#C8102E" stroke-width="7.5"/>
+  </g>
+  <rect x="2.75" y="10.75" width="58.5" height="42.5" rx="5.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1.5"/>
+</svg>

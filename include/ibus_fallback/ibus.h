@@ -330,6 +330,11 @@ IBusProperty  *ibus_property_new(const gchar *key,
                                  gboolean visible,
                                  IBusPropState state,
                                  IBusPropList *prop_list);
+void           ibus_property_set_label(IBusProperty *prop, IBusText *label);
+void           ibus_property_set_symbol(IBusProperty *prop, IBusText *symbol);
+void           ibus_property_set_icon(IBusProperty *prop, const gchar *icon);
+void           ibus_property_set_state(IBusProperty *prop, IBusPropState state);
+void           ibus_property_set_sub_props(IBusProperty *prop, IBusPropList *prop_list);
 
 void           ibus_engine_commit_text(IBusEngine *engine, IBusText *text);
 void           ibus_engine_update_preedit_text_with_mode(IBusEngine *engine,
@@ -347,6 +352,8 @@ void           ibus_engine_forward_key_event(IBusEngine *engine,
                                              guint state);
 void           ibus_engine_register_properties(IBusEngine *engine,
                                                IBusPropList *prop_list);
+void           ibus_engine_update_property(IBusEngine *engine,
+                                           IBusProperty *prop);
 const gchar   *ibus_engine_get_name(IBusEngine *engine);
 void           ibus_engine_get_content_type(IBusEngine *engine,
                                             guint *purpose,

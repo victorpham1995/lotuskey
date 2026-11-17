@@ -63,14 +63,25 @@ struct _IBusLotusEngine {
     gboolean w2u;
     gboolean bracket_transform;
     gboolean macro_enabled;
+    gboolean macro_in_off_mode;
+    gboolean auto_capitalize_macro;
+    gboolean per_app_remember;
+    gboolean auto_disable_url_bar;
+    gboolean compact_mode;
     gboolean autostart;
     gchar *output_mode;
     gchar *im_framework;
     gchar *ui_lang;
+    gchar *icon_style;      /* "flag", "badge", "lotus", "symbolic" */
+    gchar *flag_variant;    /* "us", "uk" */
+    gchar *restore_key;     /* "esc", "shift_backspace", "none" */
+    gchar *theme;           /* "auto", "dark", "light" */
     gint charset;
     gint toggle_mode;
     guint client_caps;
     gchar prev_surrounding[512];
+    gchar raw_typed[512];
+    size_t raw_typed_len;
     gchar last_bracket_key;
     gboolean ctrl_pressed;
     gboolean shift_pressed;
@@ -78,6 +89,7 @@ struct _IBusLotusEngine {
     guint grave_timer_id;
     time_t config_mtime;
     IBusPropList *prop_list;
+    IBusProperty *status_prop;
 };
 
 struct _IBusLotusEngineClass {
@@ -97,6 +109,21 @@ static guint32 g_notify_replace_id = 0;
 static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine);
 static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine);
 static void ibus_lotus_spawn_tool(const char *tool_name);
+static void ibus_lotus_spawn_tool_arg(const char *tool_name, const char *arg1);
+static void ibus_lotus_sni_notify_update(void);
+
+static void ibus_lotus_append_raw_typed(IBusLotusEngine *vl_engine, char c) {
+    if (c != 0 && vl_engine->raw_typed_len + 1 < sizeof(vl_engine->raw_typed)) {
+        vl_engine->raw_typed[vl_engine->raw_typed_len++] = c;
+        vl_engine->raw_typed[vl_engine->raw_typed_len] = '\0';
+    }
+}
+
+static void ibus_lotus_pop_raw_typed(IBusLotusEngine *vl_engine) {
+    if (vl_engine->raw_typed_len > 0) {
+        vl_engine->raw_typed[--vl_engine->raw_typed_len] = '\0';
+    }
+}
 
 static gchar *ibus_lotus_get_config_dir(void) {
     const gchar *cfg_root = g_get_user_config_dir();
@@ -122,7 +149,11 @@ static void ibus_lotus_reload_all_engines(void) {
         ibus_lotus_load_user_config(vl);
         ibus_lotus_build_prop_list(vl);
         ibus_engine_register_properties((IBusEngine *)vl, vl->prop_list);
+        if (vl->status_prop) {
+            ibus_engine_update_property((IBusEngine *)vl, vl->status_prop);
+        }
     }
+    ibus_lotus_sni_notify_update();
 }
 
 static gboolean on_sigusr1_unix_signal(gpointer user_data) {
@@ -208,6 +239,8 @@ static void ibus_lotus_engine_reset_internal(IBusLotusEngine *vl_engine) {
     vl_engine->other_key_in_chord = FALSE;
     vl_engine->last_bracket_key = 0;
     vl_engine->prev_surrounding[0] = '\0';
+    vl_engine->raw_typed[0] = '\0';
+    vl_engine->raw_typed_len = 0;
     ibus_lotus_cancel_grave_timer(vl_engine);
     if (vl_engine->session) {
         lotuskey_reset_session(vl_engine->session);
@@ -289,8 +322,10 @@ static void ibus_lotus_commit_composing(IBusLotusEngine *vl_engine, const char *
     word_utf8[0] = '\0';
 
     if (vl_engine->session && lotuskey_is_composing(vl_engine->session)) {
-        const char *raw_before = lotuskey_get_raw_text(vl_engine->session);
-        char raw_copy[256];
+        const char *raw_before = (vl_engine->raw_typed_len > 0)
+            ? vl_engine->raw_typed
+            : lotuskey_get_raw_text(vl_engine->session);
+        char raw_copy[512];
         snprintf(raw_copy, sizeof(raw_copy), "%s", raw_before ? raw_before : "");
 
         if (trailing_ascii && trailing_ascii[0] != '\0' && trailing_ascii[1] == '\0') {
@@ -307,8 +342,9 @@ static void ibus_lotus_commit_composing(IBusLotusEngine *vl_engine, const char *
         /* Check Macro Table expansion (Gõ tắt) */
         if (vl_engine->macro_enabled && g_macro_table.count > 0) {
             char expanded[512];
-            if (lotus_macro_lookup(&g_macro_table, word_utf8, expanded, sizeof(expanded)) ||
-                (raw_copy[0] != '\0' && lotus_macro_lookup(&g_macro_table, raw_copy, expanded, sizeof(expanded)))) {
+            int auto_cap = vl_engine->auto_capitalize_macro ? 1 : 0;
+            if (lotus_macro_lookup_ex(&g_macro_table, word_utf8, auto_cap, expanded, sizeof(expanded)) ||
+                (raw_copy[0] != '\0' && lotus_macro_lookup_ex(&g_macro_table, raw_copy, auto_cap, expanded, sizeof(expanded)))) {
                 snprintf(word_utf8, sizeof(word_utf8), "%s", expanded);
             }
         }
@@ -451,6 +487,16 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
             vl_engine->bracket_transform = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         } else if (strncmp(line, "MACRO_ENABLED=", 14) == 0) {
             vl_engine->macro_enabled = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "MACRO_IN_OFF_MODE=", 18) == 0) {
+            vl_engine->macro_in_off_mode = (strstr(line, "true") != NULL || strstr(line, "1") != NULL);
+        } else if (strncmp(line, "AUTO_CAPITALIZE_MACRO=", 22) == 0) {
+            vl_engine->auto_capitalize_macro = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "PER_APP_REMEMBER=", 17) == 0) {
+            vl_engine->per_app_remember = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "AUTO_DISABLE_URL_BAR=", 21) == 0) {
+            vl_engine->auto_disable_url_bar = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
+        } else if (strncmp(line, "COMPACT_MODE=", 13) == 0) {
+            vl_engine->compact_mode = (strstr(line, "false") == NULL && strstr(line, "0") == NULL);
         } else if (strncmp(line, "OUTPUT_MODE=", 12) == 0) {
             if (vl_engine->output_mode) g_free(vl_engine->output_mode);
             if (strstr(line, "surrounding")) vl_engine->output_mode = g_strdup("surrounding");
@@ -461,6 +507,7 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
             if (strstr(line, "fcitx5")) vl_engine->im_framework = g_strdup("fcitx5");
             else if (strstr(line, "uinput")) vl_engine->im_framework = g_strdup("uinput");
             else if (strstr(line, "ibus")) vl_engine->im_framework = g_strdup("ibus");
+            else if (strstr(line, "fcitx")) vl_engine->im_framework = g_strdup("fcitx");
             else vl_engine->im_framework = g_strdup("auto");
         } else if (strncmp(line, "CHARSET=", 8) == 0) {
             const char *val_p = line + 8;
@@ -475,6 +522,26 @@ static void ibus_lotus_load_user_config(IBusLotusEngine *vl_engine) {
             } else {
                 vl_engine->ui_lang = g_strdup("vi");
             }
+        } else if (strncmp(line, "ICON_STYLE=", 11) == 0) {
+            if (vl_engine->icon_style) g_free(vl_engine->icon_style);
+            if (strstr(line, "badge")) vl_engine->icon_style = g_strdup("badge");
+            else if (strstr(line, "lotus")) vl_engine->icon_style = g_strdup("lotus");
+            else if (strstr(line, "symbolic")) vl_engine->icon_style = g_strdup("symbolic");
+            else vl_engine->icon_style = g_strdup("flag");
+        } else if (strncmp(line, "FLAG_VARIANT=", 13) == 0) {
+            if (vl_engine->flag_variant) g_free(vl_engine->flag_variant);
+            if (strstr(line, "uk") || strstr(line, "UK")) vl_engine->flag_variant = g_strdup("uk");
+            else vl_engine->flag_variant = g_strdup("us");
+        } else if (strncmp(line, "RESTORE_KEY=", 12) == 0) {
+            if (vl_engine->restore_key) g_free(vl_engine->restore_key);
+            if (strstr(line, "shift_backspace")) vl_engine->restore_key = g_strdup("shift_backspace");
+            else if (strstr(line, "none") || strstr(line, "None")) vl_engine->restore_key = g_strdup("none");
+            else vl_engine->restore_key = g_strdup("esc");
+        } else if (strncmp(line, "THEME=", 6) == 0) {
+            if (vl_engine->theme) g_free(vl_engine->theme);
+            if (strstr(line, "dark")) vl_engine->theme = g_strdup("dark");
+            else if (strstr(line, "light")) vl_engine->theme = g_strdup("light");
+            else vl_engine->theme = g_strdup("auto");
         }
     }
     fclose(fp);
@@ -527,6 +594,10 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     else if (vl_engine->input_method == IM_TELEX_VNI) im_str = "telex_vni";
 
     const char *lang_str = (vl_engine->ui_lang && strcmp(vl_engine->ui_lang, "en") == 0) ? "en" : "vi";
+    const char *icon_style_str = vl_engine->icon_style ? vl_engine->icon_style : "flag";
+    const char *flag_var_str = vl_engine->flag_variant ? vl_engine->flag_variant : "us";
+    const char *restore_key_str = vl_engine->restore_key ? vl_engine->restore_key : "esc";
+    const char *theme_str = vl_engine->theme ? vl_engine->theme : "auto";
 
     fprintf(fp, "ENABLED=\"%s\"\n", vl_engine->enabled ? "true" : "false");
     fprintf(fp, "INPUT_METHOD=\"%s\"\n", im_str);
@@ -540,11 +611,20 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     fprintf(fp, "W2U=\"%s\"\n", vl_engine->w2u ? "true" : "false");
     fprintf(fp, "BRACKET_TRANSFORM=\"%s\"\n", vl_engine->bracket_transform ? "true" : "false");
     fprintf(fp, "MACRO_ENABLED=\"%s\"\n", vl_engine->macro_enabled ? "true" : "false");
+    fprintf(fp, "MACRO_IN_OFF_MODE=\"%s\"\n", vl_engine->macro_in_off_mode ? "true" : "false");
+    fprintf(fp, "AUTO_CAPITALIZE_MACRO=\"%s\"\n", vl_engine->auto_capitalize_macro ? "true" : "false");
+    fprintf(fp, "PER_APP_REMEMBER=\"%s\"\n", vl_engine->per_app_remember ? "true" : "false");
+    fprintf(fp, "AUTO_DISABLE_URL_BAR=\"%s\"\n", vl_engine->auto_disable_url_bar ? "true" : "false");
+    fprintf(fp, "COMPACT_MODE=\"%s\"\n", vl_engine->compact_mode ? "true" : "false");
     fprintf(fp, "OUTPUT_MODE=\"%s\"\n", vl_engine->output_mode ? vl_engine->output_mode : "preedit");
     fprintf(fp, "IM_FRAMEWORK=\"%s\"\n", vl_engine->im_framework ? vl_engine->im_framework : "auto");
     fprintf(fp, "CHARSET=\"%d\"\n", vl_engine->charset);
     fprintf(fp, "AUTOSTART=\"%s\"\n", vl_engine->autostart ? "true" : "false");
     fprintf(fp, "UI_LANG=\"%s\"\n", lang_str);
+    fprintf(fp, "ICON_STYLE=\"%s\"\n", icon_style_str);
+    fprintf(fp, "FLAG_VARIANT=\"%s\"\n", flag_var_str);
+    fprintf(fp, "RESTORE_KEY=\"%s\"\n", restore_key_str);
+    fprintf(fp, "THEME=\"%s\"\n", theme_str);
     fclose(fp);
     chmod(path, 0600);
 
@@ -554,8 +634,22 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
     }
     g_free(path);
 
-    /* Synchronize config.json */
+    /* Synchronize config.json while preserving excluded_apps if already configured */
     gchar *path_json = g_build_filename(dir_path, "config.json", NULL);
+    gchar *preserved_excluded_apps = NULL;
+    gchar *existing_json = NULL;
+    if (g_file_get_contents(path_json, &existing_json, NULL, NULL) && existing_json) {
+        const char *ex_key = strstr(existing_json, "\"excluded_apps\"");
+        if (ex_key) {
+            const char *br_open = strchr(ex_key, '[');
+            const char *br_close = br_open ? strchr(br_open, ']') : NULL;
+            if (br_open && br_close && br_close > br_open) {
+                preserved_excluded_apps = g_strndup(br_open, (gsize)(br_close - br_open + 1));
+            }
+        }
+        g_free(existing_json);
+    }
+
     FILE *fp_json = fopen(path_json, "w");
     if (fp_json) {
         fprintf(fp_json, "{\n");
@@ -570,21 +664,123 @@ static void ibus_lotus_save_user_config(IBusLotusEngine *vl_engine) {
         fprintf(fp_json, "    \"w2u\": %s,\n", vl_engine->w2u ? "true" : "false");
         fprintf(fp_json, "    \"bracket_transform\": %s,\n", vl_engine->bracket_transform ? "true" : "false");
         fprintf(fp_json, "    \"macro_enabled\": %s,\n", vl_engine->macro_enabled ? "true" : "false");
+        fprintf(fp_json, "    \"macro_in_off_mode\": %s,\n", vl_engine->macro_in_off_mode ? "true" : "false");
+        fprintf(fp_json, "    \"auto_capitalize_macro\": %s,\n", vl_engine->auto_capitalize_macro ? "true" : "false");
+        fprintf(fp_json, "    \"per_app_remember\": %s,\n", vl_engine->per_app_remember ? "true" : "false");
+        fprintf(fp_json, "    \"auto_disable_url_bar\": %s,\n", vl_engine->auto_disable_url_bar ? "true" : "false");
+        fprintf(fp_json, "    \"compact_mode\": %s,\n", vl_engine->compact_mode ? "true" : "false");
         fprintf(fp_json, "    \"toggle_key\": \"%s\",\n", tm_str);
         fprintf(fp_json, "    \"mode_menu_key\": \"%s\",\n", vl_engine->grave_menu_enabled ? "grave" : "None");
         fprintf(fp_json, "    \"quick_telex\": %s,\n", vl_engine->quick_telex ? "true" : "false");
         fprintf(fp_json, "    \"preedit_underline\": %s,\n", vl_engine->preedit_underline ? "true" : "false");
         fprintf(fp_json, "    \"autostart\": %s,\n", vl_engine->autostart ? "true" : "false");
-        fprintf(fp_json, "    \"ui_lang\": \"%s\"\n", lang_str);
+        fprintf(fp_json, "    \"ui_lang\": \"%s\",\n", lang_str);
+        fprintf(fp_json, "    \"icon_style\": \"%s\",\n", icon_style_str);
+        fprintf(fp_json, "    \"flag_variant\": \"%s\",\n", flag_var_str);
+        fprintf(fp_json, "    \"restore_key\": \"%s\",\n", restore_key_str);
+        fprintf(fp_json, "    \"theme\": \"%s\",\n", theme_str);
+        fprintf(fp_json, "    \"excluded_apps\": %s\n",
+                preserved_excluded_apps ? preserved_excluded_apps : "[\"kitty\", \"Alacritty\", \"wezterm\", \"foot\", \"gnome-terminal-server\", \"konsole\"]");
         fprintf(fp_json, "}\n");
         fclose(fp_json);
         chmod(path_json, 0600);
     }
+    if (preserved_excluded_apps) g_free(preserved_excluded_apps);
     g_free(path_json);
     g_free(dir_path);
 }
 
+static const char *ibus_lotus_resolve_icon_filename(IBusLotusEngine *vl_engine) {
+    const char *style = vl_engine->icon_style ? vl_engine->icon_style : "flag";
+    const char *flag_var = vl_engine->flag_variant ? vl_engine->flag_variant : "us";
+
+    if (strcmp(style, "badge") == 0) {
+        return vl_engine->enabled ? "lotuskey-badge-vn.svg" : "lotuskey-badge-en.svg";
+    }
+    if (strcmp(style, "lotus") == 0) {
+        return vl_engine->enabled ? "lotuskey.svg" : "lotuskey-off.svg";
+    }
+    if (strcmp(style, "symbolic") == 0) {
+        return vl_engine->enabled ? "lotuskey-symbolic.svg" : "lotuskey-off-symbolic.svg";
+    }
+    /* Default: flat national flag ("flag") */
+    if (vl_engine->enabled) {
+        return "lotuskey-flag-vn.svg";
+    }
+    return (strcmp(flag_var, "uk") == 0) ? "lotuskey-flag-uk.svg" : "lotuskey-flag-us.svg";
+}
+
+static const char *ibus_lotus_resolve_status_symbol(IBusLotusEngine *vl_engine) {
+    const char *style = vl_engine->icon_style ? vl_engine->icon_style : "flag";
+    const char *flag_var = vl_engine->flag_variant ? vl_engine->flag_variant : "us";
+
+    if (strcmp(style, "badge") == 0) {
+        return vl_engine->enabled ? "V" : "E";
+    }
+    if (strcmp(style, "symbolic") == 0 || strcmp(style, "lotus") == 0) {
+        return vl_engine->enabled ? "VN" : "EN";
+    }
+    if (vl_engine->enabled) {
+        return "VN";
+    }
+    return (strcmp(flag_var, "uk") == 0) ? "UK" : "US";
+}
+
+static gchar *ibus_lotus_resolve_status_icon_path(IBusLotusEngine *vl_engine) {
+    const char *fname = ibus_lotus_resolve_icon_filename(vl_engine);
+    const gchar *home = g_get_home_dir();
+    if (home) {
+        gchar *user_p = g_build_filename(home, ".local", "share", "icons", "hicolor", "scalable", "apps", fname, NULL);
+        if (g_file_test(user_p, G_FILE_TEST_EXISTS)) {
+            return user_p;
+        }
+        g_free(user_p);
+    }
+
+    gchar *sys_p = g_build_filename("/usr/share/icons/hicolor/scalable/apps", fname, NULL);
+    if (g_file_test(sys_p, G_FILE_TEST_EXISTS)) {
+        return sys_p;
+    }
+    g_free(sys_p);
+
+    char self_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (len > 0) {
+        self_path[len] = '\0';
+        gchar *bin_dir = g_path_get_dirname(self_path);
+        gchar *root_dir = g_path_get_dirname(bin_dir);
+        gchar *prefix_dir = g_path_get_dirname(root_dir);
+        gchar *asset_p = g_build_filename(root_dir, "assets", fname, NULL);
+        gchar *prefix_icon_p = g_build_filename(prefix_dir, "share", "icons", "hicolor", "scalable", "apps", fname, NULL);
+        gchar *prefix_asset_p = g_build_filename(prefix_dir, "share", "lotuskey", "assets", fname, NULL);
+        g_free(bin_dir);
+        g_free(root_dir);
+        g_free(prefix_dir);
+        if (g_file_test(asset_p, G_FILE_TEST_EXISTS)) {
+            g_free(prefix_icon_p);
+            g_free(prefix_asset_p);
+            return asset_p;
+        }
+        g_free(asset_p);
+        if (g_file_test(prefix_icon_p, G_FILE_TEST_EXISTS)) {
+            g_free(prefix_asset_p);
+            return prefix_icon_p;
+        }
+        g_free(prefix_icon_p);
+        if (g_file_test(prefix_asset_p, G_FILE_TEST_EXISTS)) {
+            return prefix_asset_p;
+        }
+        g_free(prefix_asset_p);
+    }
+
+    return g_strdup("input-keyboard");
+}
+
 static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
+    if (vl_engine->status_prop) {
+        g_object_unref(vl_engine->status_prop);
+        vl_engine->status_prop = NULL;
+    }
     if (vl_engine->prop_list) {
         g_object_unref(vl_engine->prop_list);
     }
@@ -593,21 +789,190 @@ static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
 
     IBusProperty *prop;
     IBusText *label;
+    IBusText *symbol_text;
     gboolean is_en = (vl_engine->ui_lang && strcmp(vl_engine->ui_lang, "en") == 0);
 
     const char *im_label = "Telex";
     if (vl_engine->input_method == IM_VNI) im_label = "VNI";
     else if (vl_engine->input_method == IM_TELEX_VNI) im_label = "Telex+VNI";
 
+    const char *symbol_str = ibus_lotus_resolve_status_symbol(vl_engine);
+    gchar *icon_path = ibus_lotus_resolve_status_icon_path(vl_engine);
+
     const char *mode_label = is_en
-        ? (vl_engine->enabled ? "Vietnamese" : "English")
-        : (vl_engine->enabled ? "Tiếng Việt" : "Tiếng Anh");
+        ? (vl_engine->enabled ? "Vietnamese (ON)" : "English (OFF)")
+        : (vl_engine->enabled ? "Tiếng Việt (BẬT)" : "Tiếng Anh (TẮT)");
 
-    char status_str[96];
-    snprintf(status_str, sizeof(status_str), "LotusKey: %s [%s]", mode_label, im_label);
+    char status_str[128];
+    snprintf(status_str, sizeof(status_str), "[%s] LotusKey: %s (%s)", symbol_str, mode_label, im_label);
 
+    /* 1. Primary "InputMode" property (Required by GNOME Shell Top Bar & IBus Panel) */
     label = ibus_text_new_from_string(status_str);
-    prop = ibus_property_new("lotus-status", PROP_TYPE_NORMAL, label, NULL, NULL,
+    symbol_text = ibus_text_new_from_string(symbol_str);
+    prop = ibus_property_new("InputMode", PROP_TYPE_NORMAL, label, icon_path, NULL,
+                             TRUE, TRUE, PROP_STATE_UNCHECKED, NULL);
+    ibus_property_set_symbol(prop, symbol_text);
+    vl_engine->status_prop = g_object_ref(prop);
+    ibus_prop_list_append(vl_engine->prop_list, prop);
+    g_free(icon_path);
+
+    /* 2. Submenu: Input Method (Telex / VNI / Telex+VNI) */
+    IBusPropList *im_sub = ibus_prop_list_new();
+    ibus_prop_list_append(im_sub, ibus_property_new(
+        "im-telex", PROP_TYPE_RADIO, ibus_text_new_from_static_string("Telex"), NULL, NULL,
+        TRUE, TRUE, (vl_engine->input_method == IM_TELEX) ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(im_sub, ibus_property_new(
+        "im-vni", PROP_TYPE_RADIO, ibus_text_new_from_static_string("VNI"), NULL, NULL,
+        TRUE, TRUE, (vl_engine->input_method == IM_VNI) ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(im_sub, ibus_property_new(
+        "im-telex-vni", PROP_TYPE_RADIO, ibus_text_new_from_static_string("Telex + VNI"), NULL, NULL,
+        TRUE, TRUE, (vl_engine->input_method == IM_TELEX_VNI) ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+
+    char im_menu_title[64];
+    snprintf(im_menu_title, sizeof(im_menu_title), "%s: %s",
+             is_en ? "Input Method" : "Kiểu gõ", im_label);
+    prop = ibus_property_new("menu-input-method", PROP_TYPE_MENU,
+                             ibus_text_new_from_string(im_menu_title), NULL, NULL,
+                             TRUE, TRUE, PROP_STATE_UNCHECKED, im_sub);
+    ibus_prop_list_append(vl_engine->prop_list, prop);
+
+    /* 3. Submenu: Charset (Unicode NFC / Combining NFD / TCVN3 / VNI Windows) */
+    IBusPropList *cs_sub = ibus_prop_list_new();
+    gboolean is_cs_comb = (vl_engine->charset == LOTUS_CHARSET_COMBINING_CFG || vl_engine->charset == LOTUS_CHARSET_COMBINING_ENUM);
+    gboolean is_cs_tcvn = (vl_engine->charset == LOTUS_CHARSET_TCVN3_CFG || vl_engine->charset == LOTUS_CHARSET_TCVN3_ENUM);
+    gboolean is_cs_vni  = (vl_engine->charset == LOTUS_CHARSET_VNI_WIN_CFG || vl_engine->charset == LOTUS_CHARSET_VNI_WIN_ENUM);
+    gboolean is_cs_uni  = (!is_cs_comb && !is_cs_tcvn && !is_cs_vni);
+
+    ibus_prop_list_append(cs_sub, ibus_property_new(
+        "cs-unicode", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Unicode (Precomposed NFC)" : "Unicode dựng sẵn (NFC)"), NULL, NULL,
+        TRUE, TRUE, is_cs_uni ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(cs_sub, ibus_property_new(
+        "cs-combining", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Unicode (Combining NFD)" : "Unicode tổ hợp (NFD)"), NULL, NULL,
+        TRUE, TRUE, is_cs_comb ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(cs_sub, ibus_property_new(
+        "cs-tcvn3", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string("TCVN3 (ABC)"), NULL, NULL,
+        TRUE, TRUE, is_cs_tcvn ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(cs_sub, ibus_property_new(
+        "cs-vni-win", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string("VNI Windows"), NULL, NULL,
+        TRUE, TRUE, is_cs_vni ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+
+    const char *cs_short = is_en
+        ? (is_cs_comb ? "Combining" : (is_cs_tcvn ? "TCVN3" : (is_cs_vni ? "VNI Win" : "Unicode")))
+        : (is_cs_comb ? "Tổ hợp" : (is_cs_tcvn ? "TCVN3" : (is_cs_vni ? "VNI Win" : "Unicode")));
+    char cs_menu_title[64];
+    snprintf(cs_menu_title, sizeof(cs_menu_title), "%s: %s",
+             is_en ? "Charset" : "Bảng mã", cs_short);
+    prop = ibus_property_new("menu-charset", PROP_TYPE_MENU,
+                             ibus_text_new_from_string(cs_menu_title), NULL, NULL,
+                             TRUE, TRUE, PROP_STATE_UNCHECKED, cs_sub);
+    ibus_prop_list_append(vl_engine->prop_list, prop);
+
+    /* 4. Submenu: Typing Options (smart-bilingual, modern-orthography, sen-flex, macro-enabled, w2u) */
+    IBusPropList *opt_sub = ibus_prop_list_new();
+    ibus_prop_list_append(opt_sub, ibus_property_new(
+        "smart-bilingual", PROP_TYPE_TOGGLE,
+        ibus_text_new_from_static_string(is_en ? "Auto-restore English words" : "Tự khôi phục từ tiếng Anh"), NULL, NULL,
+        TRUE, TRUE, vl_engine->smart_bilingual ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(opt_sub, ibus_property_new(
+        "modern-orthography", PROP_TYPE_TOGGLE,
+        ibus_text_new_from_static_string(is_en ? "Modern tone placement (oà, uý)" : "Đặt dấu kiểu mới (oà, uý)"), NULL, NULL,
+        TRUE, TRUE, vl_engine->modern_orthography ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(opt_sub, ibus_property_new(
+        "sen-flex", PROP_TYPE_TOGGLE,
+        ibus_text_new_from_static_string(is_en ? "Free tone marking (SEN Flex)" : "Bỏ dấu tự do (SEN Flex)"), NULL, NULL,
+        TRUE, TRUE, vl_engine->sen_flex ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(opt_sub, ibus_property_new(
+        "macro-enabled", PROP_TYPE_TOGGLE,
+        ibus_text_new_from_static_string(is_en ? "Enable Macros (Shortcuts)" : "Bật gõ tắt (Macro)"), NULL, NULL,
+        TRUE, TRUE, vl_engine->macro_enabled ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(opt_sub, ibus_property_new(
+        "w2u", PROP_TYPE_TOGGLE,
+        ibus_text_new_from_static_string(is_en ? "Convert initial W to Ư" : "Đổi W thành Ư ở đầu từ"), NULL, NULL,
+        TRUE, TRUE, vl_engine->w2u ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+
+    prop = ibus_property_new("menu-typing-options", PROP_TYPE_MENU,
+                             ibus_text_new_from_static_string(is_en ? "Typing Options" : "Tùy chọn gõ"), NULL, NULL,
+                             TRUE, TRUE, PROP_STATE_UNCHECKED, opt_sub);
+    ibus_prop_list_append(vl_engine->prop_list, prop);
+
+    /* 5. Submenu: Output Mode (Pre-edit / Surrounding / Forward) */
+    IBusPropList *out_sub = ibus_prop_list_new();
+    const char *curr_out = vl_engine->output_mode ? vl_engine->output_mode : "preedit";
+    gboolean is_out_surr = (strcmp(curr_out, "surrounding") == 0);
+    gboolean is_out_fwd  = (strcmp(curr_out, "forward") == 0);
+    gboolean is_out_pre  = (!is_out_surr && !is_out_fwd);
+
+    ibus_prop_list_append(out_sub, ibus_property_new(
+        "out-preedit", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Pre-edit (Recommended)" : "Pre-edit (Mặc định)"), NULL, NULL,
+        TRUE, TRUE, is_out_pre ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(out_sub, ibus_property_new(
+        "out-surrounding", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string("Surrounding Text"), NULL, NULL,
+        TRUE, TRUE, is_out_surr ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(out_sub, ibus_property_new(
+        "out-forward", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string("Forward Backspace"), NULL, NULL,
+        TRUE, TRUE, is_out_fwd ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+
+    const char *out_short = is_out_surr ? "Surrounding" : (is_out_fwd ? "Forward" : "Pre-edit");
+    char out_menu_title[64];
+    snprintf(out_menu_title, sizeof(out_menu_title), "%s: %s",
+             is_en ? "Output Mode" : "Chế độ xuất chữ", out_short);
+    prop = ibus_property_new("menu-output-mode", PROP_TYPE_MENU,
+                             ibus_text_new_from_string(out_menu_title), NULL, NULL,
+                             TRUE, TRUE, PROP_STATE_UNCHECKED, out_sub);
+    ibus_prop_list_append(vl_engine->prop_list, prop);
+
+    /* 6. Submenu: Tray Icon Style (Flat Flag VN/US, Flat Flag VN/UK, Badge V/E, Lotus, Symbolic) */
+    IBusPropList *ic_sub = ibus_prop_list_new();
+    const char *curr_ic = vl_engine->icon_style ? vl_engine->icon_style : "flag";
+    const char *curr_fv = vl_engine->flag_variant ? vl_engine->flag_variant : "us";
+    gboolean ic_flag_us = (strcmp(curr_ic, "flag") == 0 && strcmp(curr_fv, "uk") != 0);
+    gboolean ic_flag_uk = (strcmp(curr_ic, "flag") == 0 && strcmp(curr_fv, "uk") == 0);
+    gboolean ic_badge   = (strcmp(curr_ic, "badge") == 0);
+    gboolean ic_lotus   = (strcmp(curr_ic, "lotus") == 0);
+    gboolean ic_symb    = (strcmp(curr_ic, "symbolic") == 0);
+
+    ibus_prop_list_append(ic_sub, ibus_property_new(
+        "icon-flag-us", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Flat Flag VN / US" : "Cờ phẳng VN / US"), NULL, NULL,
+        TRUE, TRUE, ic_flag_us ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(ic_sub, ibus_property_new(
+        "icon-flag-uk", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Flat Flag VN / UK" : "Cờ phẳng VN / UK"), NULL, NULL,
+        TRUE, TRUE, ic_flag_uk ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(ic_sub, ibus_property_new(
+        "icon-badge", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "V / E Badge (UniKey)" : "Chữ V / E (UniKey)"), NULL, NULL,
+        TRUE, TRUE, ic_badge ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(ic_sub, ibus_property_new(
+        "icon-lotus", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Lotus Flower" : "Hoa sen LotusKey"), NULL, NULL,
+        TRUE, TRUE, ic_lotus ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+    ibus_prop_list_append(ic_sub, ibus_property_new(
+        "icon-symbolic", PROP_TYPE_RADIO,
+        ibus_text_new_from_static_string(is_en ? "Monochrome Symbolic" : "Đơn sắc (Symbolic)"), NULL, NULL,
+        TRUE, TRUE, ic_symb ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED, NULL));
+
+    const char *ic_short = is_en
+        ? (ic_flag_uk ? "Flag VN/UK" : (ic_badge ? "V/E Badge" : (ic_lotus ? "Lotus" : (ic_symb ? "Symbolic" : "Flag VN/US"))))
+        : (ic_flag_uk ? "Cờ VN/UK" : (ic_badge ? "Chữ V/E" : (ic_lotus ? "Hoa sen" : (ic_symb ? "Đơn sắc" : "Cờ VN/US"))));
+    char ic_menu_title[64];
+    snprintf(ic_menu_title, sizeof(ic_menu_title), "%s: %s",
+             is_en ? "Icon Style" : "Biểu tượng", ic_short);
+    prop = ibus_property_new("menu-icon-style", PROP_TYPE_MENU,
+                             ibus_text_new_from_string(ic_menu_title), NULL, NULL,
+                             TRUE, TRUE, PROP_STATE_UNCHECKED, ic_sub);
+    ibus_prop_list_append(vl_engine->prop_list, prop);
+
+    /* 7. Action Items: Clipboard Converter, Quick Menu, Settings */
+    label = ibus_text_new_from_static_string(is_en ? "Clipboard Charset Converter..." : "Chuyển mã Clipboard...");
+    prop = ibus_property_new("lotus-clipboard-convert", PROP_TYPE_NORMAL, label, "edit-paste", NULL,
                              TRUE, TRUE, PROP_STATE_UNCHECKED, NULL);
     ibus_prop_list_append(vl_engine->prop_list, prop);
 
@@ -620,47 +985,19 @@ static void ibus_lotus_build_prop_list(IBusLotusEngine *vl_engine) {
     prop = ibus_property_new("lotus-setup", PROP_TYPE_NORMAL, label, "preferences-system", NULL,
                              TRUE, TRUE, PROP_STATE_UNCHECKED, NULL);
     ibus_prop_list_append(vl_engine->prop_list, prop);
-
-    label = ibus_text_new_from_static_string(is_en ? "Auto-restore English words" : "Tự khôi phục từ tiếng Anh");
-    prop = ibus_property_new("smart-bilingual", PROP_TYPE_TOGGLE, label, NULL, NULL,
-                             TRUE, TRUE,
-                             vl_engine->smart_bilingual ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED,
-                             NULL);
-    ibus_prop_list_append(vl_engine->prop_list, prop);
-
-    label = ibus_text_new_from_static_string(is_en ? "Modern tone placement (oà, uý)" : "Đặt dấu kiểu mới (oà, uý)");
-    prop = ibus_property_new("modern-orthography", PROP_TYPE_TOGGLE, label, NULL, NULL,
-                             TRUE, TRUE,
-                             vl_engine->modern_orthography ? PROP_STATE_CHECKED : PROP_STATE_UNCHECKED,
-                             NULL);
-    ibus_prop_list_append(vl_engine->prop_list, prop);
 }
 
 static void ibus_lotus_toggle_vietnamese(IBusLotusEngine *vl_engine) {
+    active_engines = g_list_remove(active_engines, vl_engine);
+    active_engines = g_list_prepend(active_engines, vl_engine);
     vl_engine->enabled = !vl_engine->enabled;
     if (!vl_engine->enabled && lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_commit_composing(vl_engine, NULL);
     }
     ibus_lotus_save_user_config(vl_engine);
-    ibus_lotus_build_prop_list(vl_engine);
-    ibus_engine_register_properties((IBusEngine *)vl_engine, vl_engine->prop_list);
+    ibus_lotus_reload_all_engines();
 
-    const gchar *home = g_get_home_dir();
-    gchar *custom_icon = NULL;
-    if (home) {
-        custom_icon = g_build_filename(
-            home, ".local", "share", "icons", "hicolor", "scalable", "apps",
-            vl_engine->enabled ? "lotuskey.svg" : "lotuskey-off.svg",
-            NULL
-        );
-    }
-    const char *fallback_icon = vl_engine->enabled
-        ? "/usr/share/icons/hicolor/scalable/apps/lotuskey.svg"
-        : "/usr/share/icons/hicolor/scalable/apps/lotuskey-off.svg";
-    const char *icon_to_use = (custom_icon && g_file_test(custom_icon, G_FILE_TEST_EXISTS))
-        ? custom_icon
-        : (g_file_test(fallback_icon, G_FILE_TEST_EXISTS) ? fallback_icon : "input-keyboard");
-
+    gchar *icon_to_use = ibus_lotus_resolve_status_icon_path(vl_engine);
     gboolean is_en = (vl_engine->ui_lang && strcmp(vl_engine->ui_lang, "en") == 0);
     if (vl_engine->enabled) {
         ibus_lotus_send_notification(
@@ -675,7 +1012,7 @@ static void ibus_lotus_toggle_vietnamese(IBusLotusEngine *vl_engine) {
             icon_to_use
         );
     }
-    if (custom_icon) g_free(custom_icon);
+    g_free(icon_to_use);
 }
 
 typedef struct {
@@ -816,6 +1153,7 @@ static void ibus_lotus_replay_raw_keys(IBusLotusEngine *vl_engine, const char *r
 
 static void ibus_lotus_backspace_composing(IBusLotusEngine *vl_engine) {
     vl_engine->last_bracket_key = 0;
+    ibus_lotus_pop_raw_typed(vl_engine);
     const char *composing = lotuskey_get_composing_text(vl_engine->session);
     if (!composing || composing[0] == '\0') {
         ibus_lotus_engine_reset_internal(vl_engine);
@@ -937,20 +1275,32 @@ static void ibus_lotus_engine_init(IBusLotusEngine *vl_engine) {
     vl_engine->w2u = TRUE;
     vl_engine->bracket_transform = TRUE;
     vl_engine->macro_enabled = TRUE;
+    vl_engine->macro_in_off_mode = FALSE;
+    vl_engine->auto_capitalize_macro = TRUE;
+    vl_engine->per_app_remember = TRUE;
+    vl_engine->auto_disable_url_bar = TRUE;
+    vl_engine->compact_mode = TRUE;
     vl_engine->autostart = TRUE;
     vl_engine->output_mode = g_strdup("preedit");
     vl_engine->im_framework = g_strdup("auto");
     vl_engine->ui_lang = g_strdup("vi");
+    vl_engine->icon_style = g_strdup("flag");
+    vl_engine->flag_variant = g_strdup("us");
+    vl_engine->restore_key = g_strdup("esc");
+    vl_engine->theme = g_strdup("auto");
     vl_engine->charset = 0;
     vl_engine->toggle_mode = TOGGLE_BOTH;
     vl_engine->client_caps = 0;
     vl_engine->prev_surrounding[0] = '\0';
+    vl_engine->raw_typed[0] = '\0';
+    vl_engine->raw_typed_len = 0;
     vl_engine->last_bracket_key = 0;
     vl_engine->ctrl_pressed = FALSE;
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
     vl_engine->grave_timer_id = 0;
     vl_engine->prop_list = NULL;
+    vl_engine->status_prop = NULL;
 
     active_engines = g_list_append(active_engines, vl_engine);
 
@@ -975,6 +1325,26 @@ static void ibus_lotus_engine_finalize(GObject *object) {
         g_free(vl_engine->ui_lang);
         vl_engine->ui_lang = NULL;
     }
+    if (vl_engine->icon_style) {
+        g_free(vl_engine->icon_style);
+        vl_engine->icon_style = NULL;
+    }
+    if (vl_engine->flag_variant) {
+        g_free(vl_engine->flag_variant);
+        vl_engine->flag_variant = NULL;
+    }
+    if (vl_engine->restore_key) {
+        g_free(vl_engine->restore_key);
+        vl_engine->restore_key = NULL;
+    }
+    if (vl_engine->theme) {
+        g_free(vl_engine->theme);
+        vl_engine->theme = NULL;
+    }
+    if (vl_engine->status_prop) {
+        g_object_unref(vl_engine->status_prop);
+        vl_engine->status_prop = NULL;
+    }
     if (vl_engine->prop_list) {
         g_object_unref(vl_engine->prop_list);
         vl_engine->prop_list = NULL;
@@ -997,6 +1367,8 @@ static void ibus_lotus_engine_reset(IBusEngine *engine) {
 
 static void ibus_lotus_engine_enable(IBusEngine *engine) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
+    active_engines = g_list_remove(active_engines, vl_engine);
+    active_engines = g_list_prepend(active_engines, vl_engine);
     const gchar *engine_name = ibus_engine_get_name(engine);
     if (engine_name && strstr(engine_name, "vni") != NULL) {
         vl_engine->is_vni = TRUE;
@@ -1009,6 +1381,11 @@ static void ibus_lotus_engine_enable(IBusEngine *engine) {
     }
     ibus_lotus_load_user_config(vl_engine);
     ibus_lotus_build_prop_list(vl_engine);
+    ibus_engine_register_properties(engine, vl_engine->prop_list);
+    if (vl_engine->status_prop) {
+        ibus_engine_update_property(engine, vl_engine->status_prop);
+    }
+    ibus_lotus_sni_notify_update();
     ibus_lotus_engine_reset_internal(vl_engine);
     if (vl_engine->session) {
         lotuskey_append_context(vl_engine->session, "");
@@ -1032,16 +1409,24 @@ static void ibus_lotus_engine_disable(IBusEngine *engine) {
 
 static void ibus_lotus_engine_focus_in(IBusEngine *engine) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
+    active_engines = g_list_remove(active_engines, vl_engine);
+    active_engines = g_list_prepend(active_engines, vl_engine);
+    ibus_lotus_load_user_config(vl_engine);
     guint purpose = IBUS_INPUT_PURPOSE_FREE_FORM;
     guint hints = IBUS_INPUT_HINT_NONE;
     ibus_engine_get_content_type(engine, &purpose, &hints);
-    vl_engine->is_password_field = (purpose == IBUS_INPUT_PURPOSE_PASSWORD) || (purpose == IBUS_INPUT_PURPOSE_PIN);
+    vl_engine->is_password_field = (purpose == IBUS_INPUT_PURPOSE_PASSWORD) ||
+                                   (purpose == IBUS_INPUT_PURPOSE_PIN) ||
+                                   (vl_engine->auto_disable_url_bar && purpose == IBUS_INPUT_PURPOSE_URL);
     vl_engine->ctrl_pressed = FALSE;
     vl_engine->shift_pressed = FALSE;
     vl_engine->other_key_in_chord = FALSE;
-    ibus_lotus_load_user_config(vl_engine);
     ibus_lotus_build_prop_list(vl_engine);
     ibus_engine_register_properties(engine, vl_engine->prop_list);
+    if (vl_engine->status_prop) {
+        ibus_engine_update_property(engine, vl_engine->status_prop);
+    }
+    ibus_lotus_sni_notify_update();
     IBUS_ENGINE_CLASS(ibus_lotus_engine_parent_class)->focus_in(engine);
 }
 
@@ -1073,7 +1458,9 @@ static void ibus_lotus_engine_set_capabilities(IBusEngine *engine, guint caps) {
 
 static void ibus_lotus_engine_set_content_type(IBusEngine *engine, guint purpose, guint hints) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
-    vl_engine->is_password_field = (purpose == IBUS_INPUT_PURPOSE_PASSWORD) || (purpose == IBUS_INPUT_PURPOSE_PIN);
+    vl_engine->is_password_field = (purpose == IBUS_INPUT_PURPOSE_PASSWORD) ||
+                                   (purpose == IBUS_INPUT_PURPOSE_PIN) ||
+                                   (vl_engine->auto_disable_url_bar && purpose == IBUS_INPUT_PURPOSE_URL);
     if (vl_engine->is_password_field && lotuskey_is_composing(vl_engine->session)) {
         ibus_lotus_engine_reset_internal(vl_engine);
     }
@@ -1082,70 +1469,215 @@ static void ibus_lotus_engine_set_content_type(IBusEngine *engine, guint purpose
     }
 }
 
-static gboolean ibus_lotus_try_spawn_verified(const char *candidate) {
+static gboolean ibus_lotus_try_spawn_verified_arg(const char *candidate, const char *arg1) {
     struct stat st;
     if (stat(candidate, &st) != 0) return FALSE;
     if (!S_ISREG(st.st_mode)) return FALSE;
-    if (st.st_uid != getuid() && st.st_uid != 0) return FALSE;
+    if (st.st_uid != getuid() && st.st_uid != 0 &&
+        !g_str_has_prefix(candidate, "/nix/store/") &&
+        !g_str_has_prefix(candidate, "/app/")) {
+        return FALSE;
+    }
     if (!g_file_test(candidate, G_FILE_TEST_IS_EXECUTABLE)) return FALSE;
-    gchar *argv[] = { (gchar *)candidate, NULL };
+    gchar *argv[] = { (gchar *)candidate, (gchar *)arg1, NULL };
     return g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL);
 }
 
-static void ibus_lotus_spawn_tool(const char *tool_name) {
+static void ibus_lotus_spawn_tool_arg(const char *tool_name, const char *arg1) {
     char self_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
     if (len > 0) {
         self_path[len] = '\0';
         gchar *bin_dir = g_path_get_dirname(self_path);
         gchar *sibling = g_build_filename(bin_dir, tool_name, NULL);
-        g_free(bin_dir);
-        if (ibus_lotus_try_spawn_verified(sibling)) {
+        if (ibus_lotus_try_spawn_verified_arg(sibling, arg1)) {
             g_free(sibling);
+            g_free(bin_dir);
             return;
         }
         g_free(sibling);
+
+        /* Also check ../../bin/<tool> and ../bin/<tool> relative to /proc/self/exe
+         * (e.g. when engine is at $PREFIX/lib/lotuskey/ibus-engine-lotuskey on NixOS / Flatpak / /usr/local) */
+        gchar *parent_dir = g_path_get_dirname(bin_dir);
+        gchar *prefix_dir = g_path_get_dirname(parent_dir);
+        gchar *prefix_bin = g_build_filename(prefix_dir, "bin", tool_name, NULL);
+        gchar *parent_bin = g_build_filename(parent_dir, "bin", tool_name, NULL);
+        g_free(bin_dir);
+        g_free(parent_dir);
+        g_free(prefix_dir);
+
+        if (ibus_lotus_try_spawn_verified_arg(prefix_bin, arg1)) {
+            g_free(prefix_bin);
+            g_free(parent_bin);
+            return;
+        }
+        g_free(prefix_bin);
+
+        if (ibus_lotus_try_spawn_verified_arg(parent_bin, arg1)) {
+            g_free(parent_bin);
+            return;
+        }
+        g_free(parent_bin);
     }
 
     const gchar *home = g_get_home_dir();
     if (home) {
         gchar *local_bin = g_build_filename(home, ".local", "bin", tool_name, NULL);
-        if (ibus_lotus_try_spawn_verified(local_bin)) {
+        if (ibus_lotus_try_spawn_verified_arg(local_bin, arg1)) {
             g_free(local_bin);
             return;
         }
         g_free(local_bin);
     }
 
+    gchar *usr_local_bin = g_build_filename("/usr/local/bin", tool_name, NULL);
+    if (ibus_lotus_try_spawn_verified_arg(usr_local_bin, arg1)) {
+        g_free(usr_local_bin);
+        return;
+    }
+    g_free(usr_local_bin);
+
     gchar *usr_bin = g_build_filename("/usr/bin", tool_name, NULL);
-    if (ibus_lotus_try_spawn_verified(usr_bin)) {
+    if (ibus_lotus_try_spawn_verified_arg(usr_bin, arg1)) {
         g_free(usr_bin);
         return;
     }
     g_free(usr_bin);
+
+    gchar *path_bin = g_find_program_in_path(tool_name);
+    if (path_bin) {
+        ibus_lotus_try_spawn_verified_arg(path_bin, arg1);
+        g_free(path_bin);
+    }
+}
+
+static void ibus_lotus_spawn_tool(const char *tool_name) {
+    ibus_lotus_spawn_tool_arg(tool_name, NULL);
 }
 
 static void ibus_lotus_engine_property_activate(IBusEngine *engine, const gchar *prop_name, guint prop_state) {
     IBusLotusEngine *vl_engine = (IBusLotusEngine *)engine;
+    if (!prop_name || g_str_has_prefix(prop_name, "menu-")) {
+        return;
+    }
     if (g_strcmp0(prop_name, "lotus-setup") == 0) {
         ibus_lotus_spawn_tool("lotuskey-setup");
+        return;
+    } else if (g_strcmp0(prop_name, "lotus-clipboard-convert") == 0) {
+        ibus_lotus_spawn_tool_arg("lotuskey-setup", "--converter");
         return;
     } else if (g_strcmp0(prop_name, "lotus-quick-menu") == 0) {
         ibus_lotus_spawn_tool("lotuskey-menu");
         return;
-    } else if (g_strcmp0(prop_name, "lotus-status") == 0) {
+    } else if (g_strcmp0(prop_name, "InputMode") == 0 || g_strcmp0(prop_name, "lotus-status") == 0) {
         ibus_lotus_toggle_vietnamese(vl_engine);
         return;
+    }
+
+    /* For radio items, only act when selected (PROP_STATE_CHECKED) */
+    if (g_str_has_prefix(prop_name, "im-") ||
+        g_str_has_prefix(prop_name, "cs-") ||
+        g_str_has_prefix(prop_name, "out-") ||
+        g_str_has_prefix(prop_name, "icon-")) {
+        if (prop_state != PROP_STATE_CHECKED) {
+            return;
+        }
+        if (g_strcmp0(prop_name, "im-telex") == 0) {
+            vl_engine->input_method = IM_TELEX;
+            vl_engine->is_vni = FALSE;
+            lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_TELEX);
+        } else if (g_strcmp0(prop_name, "im-vni") == 0) {
+            vl_engine->input_method = IM_VNI;
+            vl_engine->is_vni = TRUE;
+            lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_VNI);
+        } else if (g_strcmp0(prop_name, "im-telex-vni") == 0) {
+            vl_engine->input_method = IM_TELEX_VNI;
+            vl_engine->is_vni = FALSE;
+            lotuskey_set_input_method(vl_engine->session, LOTUSKEY_INPUT_TELEX);
+        } else if (g_strcmp0(prop_name, "cs-unicode") == 0) {
+            vl_engine->charset = LOTUS_CHARSET_UNICODE;
+        } else if (g_strcmp0(prop_name, "cs-combining") == 0) {
+            vl_engine->charset = LOTUS_CHARSET_COMBINING_CFG;
+        } else if (g_strcmp0(prop_name, "cs-tcvn3") == 0) {
+            vl_engine->charset = LOTUS_CHARSET_TCVN3_CFG;
+        } else if (g_strcmp0(prop_name, "cs-vni-win") == 0) {
+            vl_engine->charset = LOTUS_CHARSET_VNI_WIN_CFG;
+        } else if (g_strcmp0(prop_name, "out-preedit") == 0) {
+            g_free(vl_engine->output_mode);
+            vl_engine->output_mode = g_strdup("preedit");
+        } else if (g_strcmp0(prop_name, "out-surrounding") == 0) {
+            g_free(vl_engine->output_mode);
+            vl_engine->output_mode = g_strdup("surrounding");
+        } else if (g_strcmp0(prop_name, "out-forward") == 0) {
+            g_free(vl_engine->output_mode);
+            vl_engine->output_mode = g_strdup("forward");
+        } else if (g_strcmp0(prop_name, "icon-flag-us") == 0) {
+            g_free(vl_engine->icon_style);
+            g_free(vl_engine->flag_variant);
+            vl_engine->icon_style = g_strdup("flag");
+            vl_engine->flag_variant = g_strdup("us");
+        } else if (g_strcmp0(prop_name, "icon-flag-uk") == 0) {
+            g_free(vl_engine->icon_style);
+            g_free(vl_engine->flag_variant);
+            vl_engine->icon_style = g_strdup("flag");
+            vl_engine->flag_variant = g_strdup("uk");
+        } else if (g_strcmp0(prop_name, "icon-badge") == 0) {
+            g_free(vl_engine->icon_style);
+            vl_engine->icon_style = g_strdup("badge");
+        } else if (g_strcmp0(prop_name, "icon-lotus") == 0) {
+            g_free(vl_engine->icon_style);
+            vl_engine->icon_style = g_strdup("lotus");
+        } else if (g_strcmp0(prop_name, "icon-symbolic") == 0) {
+            g_free(vl_engine->icon_style);
+            vl_engine->icon_style = g_strdup("symbolic");
+        }
     } else if (g_strcmp0(prop_name, "smart-bilingual") == 0) {
         vl_engine->smart_bilingual = (prop_state == PROP_STATE_CHECKED);
         lotuskey_set_smart_bilingual(vl_engine->session, vl_engine->smart_bilingual);
     } else if (g_strcmp0(prop_name, "modern-orthography") == 0) {
         vl_engine->modern_orthography = (prop_state == PROP_STATE_CHECKED);
         lotuskey_set_modern_orthography(vl_engine->session, vl_engine->modern_orthography);
+    } else if (g_strcmp0(prop_name, "sen-flex") == 0) {
+        vl_engine->sen_flex = (prop_state == PROP_STATE_CHECKED);
+        lotuskey_set_grammar_profile(
+            vl_engine->session,
+            vl_engine->sen_flex ? LOTUSKEY_GRAMMAR_SEN_FLEX : LOTUSKEY_GRAMMAR_CLASSIC
+        );
+    } else if (g_strcmp0(prop_name, "macro-enabled") == 0) {
+        vl_engine->macro_enabled = (prop_state == PROP_STATE_CHECKED);
+    } else if (g_strcmp0(prop_name, "w2u") == 0) {
+        vl_engine->w2u = (prop_state == PROP_STATE_CHECKED);
     }
+
+    active_engines = g_list_remove(active_engines, vl_engine);
+    active_engines = g_list_prepend(active_engines, vl_engine);
     ibus_lotus_save_user_config(vl_engine);
-    ibus_lotus_build_prop_list(vl_engine);
-    ibus_engine_register_properties(engine, vl_engine->prop_list);
+    ibus_lotus_reload_all_engines();
+}
+
+static void ibus_lotus_restore_raw_word(IBusLotusEngine *vl_engine) {
+    IBusEngine *engine = (IBusEngine *)vl_engine;
+    const char *raw = (vl_engine->raw_typed_len > 0)
+        ? vl_engine->raw_typed
+        : lotuskey_get_raw_text(vl_engine->session);
+    char raw_buf[512];
+    snprintf(raw_buf, sizeof(raw_buf), "%s", raw ? raw : "");
+
+    if (!ibus_lotus_use_preedit_mode(vl_engine)) {
+        if (raw_buf[0] != '\0') {
+            ibus_lotus_sync_direct_output(vl_engine, raw_buf);
+        }
+        ibus_lotus_engine_reset_internal(vl_engine);
+        return;
+    }
+
+    ibus_lotus_clear_preedit(engine);
+    if (raw_buf[0] != '\0') {
+        IBusText *commit_text = ibus_text_new_from_string(raw_buf);
+        ibus_engine_commit_text(engine, commit_text);
+    }
+    ibus_lotus_engine_reset_internal(vl_engine);
 }
 
 static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint keyval, guint keycode, guint state) {
@@ -1200,7 +1732,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         ibus_engine_commit_text(engine, grave_text);
     }
 
-    /* Password / PIN protection */
+    /* Password / PIN / URL protection */
     if (vl_engine->is_password_field) {
         if (lotuskey_is_composing(vl_engine->session)) {
             ibus_lotus_engine_reset_internal(vl_engine);
@@ -1238,6 +1770,20 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return FALSE;
     }
 
+    /* Word Restore Key: Esc or Shift+Backspace restores composing Vietnamese syllable to raw ASCII */
+    if (lotuskey_is_composing(vl_engine->session) && vl_engine->restore_key) {
+        if (g_strcmp0(vl_engine->restore_key, "esc") == 0 &&
+            (keyval == IBUS_KEY_Escape || keyval == 0x1b)) {
+            ibus_lotus_restore_raw_word(vl_engine);
+            return TRUE;
+        }
+        if (g_strcmp0(vl_engine->restore_key, "shift_backspace") == 0 &&
+            keyval == IBUS_KEY_BackSpace && (state & IBUS_SHIFT_MASK)) {
+            ibus_lotus_restore_raw_word(vl_engine);
+            return TRUE;
+        }
+    }
+
     /* Navigation & action keys: commit active word first */
     if (keyval == IBUS_KEY_Return || keyval == IBUS_KEY_KP_Enter || keyval == IBUS_KEY_Linefeed ||
         keyval == IBUS_KEY_Tab || keyval == IBUS_KEY_ISO_Left_Tab || keyval == IBUS_KEY_KP_Tab ||
@@ -1261,6 +1807,9 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             ibus_lotus_backspace_composing(vl_engine);
             return TRUE;
         }
+        if (!vl_engine->enabled && vl_engine->raw_typed_len > 0) {
+            ibus_lotus_pop_raw_typed(vl_engine);
+        }
         lotuskey_reset_session(vl_engine->session);
         return FALSE;
     }
@@ -1276,8 +1825,40 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
         return TRUE;
     }
 
-    /* If Vietnamese is disabled, pass all printable characters through directly (English passthrough) */
+    /* If Vietnamese is disabled, support optional macro expansion in OFF mode or pass through */
     if (!vl_engine->enabled) {
+        if (vl_engine->macro_enabled && vl_engine->macro_in_off_mode && g_macro_table.count > 0) {
+            if ((keyval >= 'a' && keyval <= 'z') || (keyval >= 'A' && keyval <= 'Z') || (keyval >= '0' && keyval <= '9')) {
+                ibus_lotus_append_raw_typed(vl_engine, (char)keyval);
+                return FALSE;
+            }
+            if (keyval == ' ' && vl_engine->raw_typed_len > 0) {
+                char expanded[512];
+                int auto_cap = vl_engine->auto_capitalize_macro ? 1 : 0;
+                if (lotus_macro_lookup_ex(&g_macro_table, vl_engine->raw_typed, auto_cap, expanded, sizeof(expanded))) {
+                    size_t del_n = vl_engine->raw_typed_len;
+                    vl_engine->raw_typed[0] = '\0';
+                    vl_engine->raw_typed_len = 0;
+                    if (vl_engine->client_caps & IBUS_CAP_SURROUNDING_TEXT) {
+                        ibus_engine_delete_surrounding_text(engine, -(gint)del_n, (guint)del_n);
+                    } else {
+                        for (size_t i = 0; i < del_n; i++) {
+                            ibus_engine_forward_key_event(engine, IBUS_KEY_BackSpace, 14, 0);
+                            ibus_engine_forward_key_event(engine, IBUS_KEY_BackSpace, 14, IBUS_RELEASE_MASK);
+                        }
+                    }
+                    char converted[1024];
+                    lotus_convert_charset(expanded, vl_engine->charset, converted, sizeof(converted));
+                    char out_space[1028];
+                    snprintf(out_space, sizeof(out_space), "%s ", converted);
+                    IBusText *commit_text = ibus_text_new_from_string(out_space);
+                    ibus_engine_commit_text(engine, commit_text);
+                    return TRUE;
+                }
+            }
+            vl_engine->raw_typed[0] = '\0';
+            vl_engine->raw_typed_len = 0;
+        }
         return FALSE;
     }
 
@@ -1294,6 +1875,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
             return TRUE;
         }
         vl_engine->last_bracket_key = (char)keyval;
+        ibus_lotus_append_raw_typed(vl_engine, (char)keyval);
         char base_vowel = (keyval == '[' || keyval == ']') ? ((keyval == '[') ? 'o' : 'u')
                                                            : ((keyval == '{') ? 'O' : 'U');
         char horn_key = (keyval == '[' || keyval == ']') ? 'w' : 'W';
@@ -1307,6 +1889,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
     /* Handle W2U option: If w2u is disabled, typing 'w' or 'W' at start of word should NOT turn into 'ư'/'Ư',
      * while keeping 'w' inside the composing buffer so English words like "water"/"window" stay intact! */
     if (!vl_engine->w2u && !vl_engine->is_vni && (keyval == 'w' || keyval == 'W') && !lotuskey_is_composing(vl_engine->session)) {
+        ibus_lotus_append_raw_typed(vl_engine, (char)keyval);
         lotuskey_feed_char(vl_engine->session, keyval);
         lotuskey_feed_char(vl_engine->session, keyval);
         ibus_lotus_update_preedit(vl_engine);
@@ -1315,6 +1898,7 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
 
     /* Handle printable ASCII characters (32..126) */
     if (keyval >= 32 && keyval < 127) {
+        char orig_ascii = (char)keyval;
         gboolean is_alpha = (keyval >= 'a' && keyval <= 'z') || (keyval >= 'A' && keyval <= 'Z');
         gboolean is_digit = (keyval >= '0' && keyval <= '9');
 
@@ -1361,6 +1945,8 @@ static gboolean ibus_lotus_engine_process_key_event(IBusEngine *engine, guint ke
                 ibus_lotus_commit_composing(vl_engine, NULL);
             }
         }
+
+        ibus_lotus_append_raw_typed(vl_engine, orig_ascii);
 
         /* Telex stop-coda and tone corrections */
         if (!vl_engine->is_vni && lotuskey_is_composing(vl_engine->session)) {
@@ -1474,6 +2060,894 @@ static void ibus_lotus_engine_class_init(IBusLotusEngineClass *klass) {
     engine_class->set_content_type = ibus_lotus_engine_set_content_type;
     engine_class->property_activate = ibus_lotus_engine_property_activate;
     engine_class->process_key_event = ibus_lotus_engine_process_key_event;
+}
+
+/* ============================================================================
+ * Native StatusNotifierItem (SNI) & DBusMenu Tray Indicator
+ * Renders the 100% flat SVG flag icon (lotuskey-flag-vn/us/uk.svg) directly
+ * on Ubuntu GNOME Top Bar (ubuntu-appindicators), KDE Plasma, XFCE, Waybar.
+ * ============================================================================ */
+static GDBusConnection *g_sni_conn = NULL;
+static guint32 g_sni_menu_revision = 1;
+static gboolean g_sni_fallback_enabled = TRUE;
+static gint g_sni_fallback_im = IM_TELEX;
+static gint g_sni_fallback_charset = LOTUS_CHARSET_UNICODE;
+static gboolean g_sni_fallback_smart_bilingual = TRUE;
+static gboolean g_sni_fallback_modern_orthography = TRUE;
+static gboolean g_sni_fallback_sen_flex = TRUE;
+static gboolean g_sni_fallback_macro_enabled = TRUE;
+static gboolean g_sni_fallback_w2u = TRUE;
+static gchar *g_sni_fallback_output_mode = NULL;
+static gchar *g_sni_fallback_icon_style = NULL;
+static gchar *g_sni_fallback_flag_var = NULL;
+static gchar *g_sni_fallback_lang = NULL;
+
+static void sni_sync_fallback_from_config(void) {
+    if (active_engines != NULL) {
+        IBusLotusEngine *vl = (IBusLotusEngine *)active_engines->data;
+        g_sni_fallback_enabled = vl->enabled;
+        g_sni_fallback_im = vl->input_method;
+        g_sni_fallback_charset = vl->charset;
+        g_sni_fallback_smart_bilingual = vl->smart_bilingual;
+        g_sni_fallback_modern_orthography = vl->modern_orthography;
+        g_sni_fallback_sen_flex = vl->sen_flex;
+        g_sni_fallback_macro_enabled = vl->macro_enabled;
+        g_sni_fallback_w2u = vl->w2u;
+        g_free(g_sni_fallback_output_mode);
+        g_sni_fallback_output_mode = g_strdup(vl->output_mode ? vl->output_mode : "preedit");
+        g_free(g_sni_fallback_icon_style);
+        g_sni_fallback_icon_style = g_strdup(vl->icon_style ? vl->icon_style : "flag");
+        g_free(g_sni_fallback_flag_var);
+        g_sni_fallback_flag_var = g_strdup(vl->flag_variant ? vl->flag_variant : "us");
+        g_free(g_sni_fallback_lang);
+        g_sni_fallback_lang = g_strdup(vl->ui_lang ? vl->ui_lang : "vi");
+        return;
+    }
+    IBusLotusEngine tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.session = lotuskey_create_session();
+    tmp.enabled = TRUE;
+    tmp.input_method = IM_TELEX;
+    tmp.charset = LOTUS_CHARSET_UNICODE;
+    tmp.smart_bilingual = TRUE;
+    tmp.sen_flex = TRUE;
+    tmp.modern_orthography = TRUE;
+    tmp.w2u = TRUE;
+    tmp.bracket_transform = TRUE;
+    tmp.macro_enabled = TRUE;
+    tmp.auto_capitalize_macro = TRUE;
+    tmp.per_app_remember = TRUE;
+    tmp.auto_disable_url_bar = TRUE;
+    tmp.compact_mode = TRUE;
+    tmp.autostart = TRUE;
+    tmp.grave_menu_enabled = TRUE;
+    tmp.output_mode = g_strdup("preedit");
+    tmp.im_framework = g_strdup("auto");
+    tmp.icon_style = g_strdup("flag");
+    tmp.flag_variant = g_strdup("us");
+    tmp.ui_lang = g_strdup("vi");
+    ibus_lotus_load_user_config(&tmp);
+    g_sni_fallback_enabled = tmp.enabled;
+    g_sni_fallback_im = tmp.input_method;
+    g_sni_fallback_charset = tmp.charset;
+    g_sni_fallback_smart_bilingual = tmp.smart_bilingual;
+    g_sni_fallback_modern_orthography = tmp.modern_orthography;
+    g_sni_fallback_sen_flex = tmp.sen_flex;
+    g_sni_fallback_macro_enabled = tmp.macro_enabled;
+    g_sni_fallback_w2u = tmp.w2u;
+    g_free(g_sni_fallback_output_mode);
+    g_sni_fallback_output_mode = g_strdup(tmp.output_mode ? tmp.output_mode : "preedit");
+    g_free(g_sni_fallback_icon_style);
+    g_sni_fallback_icon_style = g_strdup(tmp.icon_style ? tmp.icon_style : "flag");
+    g_free(g_sni_fallback_flag_var);
+    g_sni_fallback_flag_var = g_strdup(tmp.flag_variant ? tmp.flag_variant : "us");
+    g_free(g_sni_fallback_lang);
+    g_sni_fallback_lang = g_strdup(tmp.ui_lang ? tmp.ui_lang : "vi");
+    g_free(tmp.output_mode);
+    g_free(tmp.im_framework);
+    g_free(tmp.ui_lang);
+    g_free(tmp.icon_style);
+    g_free(tmp.flag_variant);
+    g_free(tmp.restore_key);
+    g_free(tmp.theme);
+    if (tmp.session) lotuskey_destroy_session(tmp.session);
+}
+
+static gchar *sni_get_current_icon_path(void) {
+    if (active_engines != NULL) {
+        return ibus_lotus_resolve_status_icon_path((IBusLotusEngine *)active_engines->data);
+    }
+    sni_sync_fallback_from_config();
+    IBusLotusEngine tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.enabled = g_sni_fallback_enabled;
+    tmp.icon_style = g_sni_fallback_icon_style;
+    tmp.flag_variant = g_sni_fallback_flag_var;
+    return ibus_lotus_resolve_status_icon_path(&tmp);
+}
+
+static gboolean sni_is_action_item_id(gint id) {
+    return (id == 1 ||
+            (id >= 10 && id <= 12) ||
+            (id >= 21 && id <= 23) ||
+            (id >= 31 && id <= 34) ||
+            (id >= 41 && id <= 45) ||
+            (id >= 51 && id <= 53) ||
+            (id >= 61 && id <= 65));
+}
+
+static void sni_mutate_engine_for_item(IBusLotusEngine *vl, gint item_id) {
+    switch (item_id) {
+        case 21:
+            vl->input_method = IM_TELEX;
+            vl->is_vni = FALSE;
+            if (vl->session) lotuskey_set_input_method(vl->session, LOTUSKEY_INPUT_TELEX);
+            break;
+        case 22:
+            vl->input_method = IM_VNI;
+            vl->is_vni = TRUE;
+            if (vl->session) lotuskey_set_input_method(vl->session, LOTUSKEY_INPUT_VNI);
+            break;
+        case 23:
+            vl->input_method = IM_TELEX_VNI;
+            vl->is_vni = FALSE;
+            if (vl->session) lotuskey_set_input_method(vl->session, LOTUSKEY_INPUT_TELEX);
+            break;
+        case 31:
+            vl->charset = LOTUS_CHARSET_UNICODE;
+            break;
+        case 32:
+            vl->charset = LOTUS_CHARSET_COMBINING_CFG;
+            break;
+        case 33:
+            vl->charset = LOTUS_CHARSET_TCVN3_CFG;
+            break;
+        case 34:
+            vl->charset = LOTUS_CHARSET_VNI_WIN_CFG;
+            break;
+        case 41:
+            vl->smart_bilingual = !vl->smart_bilingual;
+            if (vl->session) lotuskey_set_smart_bilingual(vl->session, vl->smart_bilingual);
+            break;
+        case 42:
+            vl->modern_orthography = !vl->modern_orthography;
+            if (vl->session) lotuskey_set_modern_orthography(vl->session, vl->modern_orthography);
+            break;
+        case 43:
+            vl->sen_flex = !vl->sen_flex;
+            if (vl->session) {
+                lotuskey_set_grammar_profile(
+                    vl->session,
+                    vl->sen_flex ? LOTUSKEY_GRAMMAR_SEN_FLEX : LOTUSKEY_GRAMMAR_CLASSIC
+                );
+            }
+            break;
+        case 44:
+            vl->macro_enabled = !vl->macro_enabled;
+            break;
+        case 45:
+            vl->w2u = !vl->w2u;
+            break;
+        case 51:
+            g_free(vl->output_mode);
+            vl->output_mode = g_strdup("preedit");
+            break;
+        case 52:
+            g_free(vl->output_mode);
+            vl->output_mode = g_strdup("surrounding");
+            break;
+        case 53:
+            g_free(vl->output_mode);
+            vl->output_mode = g_strdup("forward");
+            break;
+        case 61:
+            g_free(vl->icon_style);
+            g_free(vl->flag_variant);
+            vl->icon_style = g_strdup("flag");
+            vl->flag_variant = g_strdup("us");
+            break;
+        case 62:
+            g_free(vl->icon_style);
+            g_free(vl->flag_variant);
+            vl->icon_style = g_strdup("flag");
+            vl->flag_variant = g_strdup("uk");
+            break;
+        case 63:
+            g_free(vl->icon_style);
+            vl->icon_style = g_strdup("badge");
+            break;
+        case 64:
+            g_free(vl->icon_style);
+            vl->icon_style = g_strdup("lotus");
+            break;
+        case 65:
+            g_free(vl->icon_style);
+            vl->icon_style = g_strdup("symbolic");
+            break;
+        default:
+            break;
+    }
+}
+
+static void sni_apply_menu_action(gint item_id) {
+    if (item_id == 10) {
+        ibus_lotus_spawn_tool_arg("lotuskey-setup", "--converter");
+        return;
+    }
+    if (item_id == 11) {
+        ibus_lotus_spawn_tool("lotuskey-menu");
+        return;
+    }
+    if (item_id == 12) {
+        ibus_lotus_spawn_tool("lotuskey-setup");
+        return;
+    }
+
+    if (active_engines != NULL) {
+        IBusLotusEngine *vl = (IBusLotusEngine *)active_engines->data;
+        if (item_id == 1) {
+            ibus_lotus_toggle_vietnamese(vl);
+            return;
+        }
+        sni_mutate_engine_for_item(vl, item_id);
+        ibus_lotus_save_user_config(vl);
+        ibus_lotus_reload_all_engines();
+        return;
+    }
+
+    /* Fallback if no engine instance has been focused yet */
+    IBusLotusEngine tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.session = lotuskey_create_session();
+    tmp.enabled = TRUE;
+    tmp.input_method = IM_TELEX;
+    tmp.charset = LOTUS_CHARSET_UNICODE;
+    tmp.smart_bilingual = TRUE;
+    tmp.sen_flex = TRUE;
+    tmp.modern_orthography = TRUE;
+    tmp.w2u = TRUE;
+    tmp.bracket_transform = TRUE;
+    tmp.macro_enabled = TRUE;
+    tmp.auto_capitalize_macro = TRUE;
+    tmp.per_app_remember = TRUE;
+    tmp.auto_disable_url_bar = TRUE;
+    tmp.compact_mode = TRUE;
+    tmp.autostart = TRUE;
+    tmp.grave_menu_enabled = TRUE;
+    tmp.output_mode = g_strdup("preedit");
+    tmp.im_framework = g_strdup("auto");
+    tmp.ui_lang = g_strdup("vi");
+    tmp.icon_style = g_strdup("flag");
+    tmp.flag_variant = g_strdup("us");
+    tmp.restore_key = g_strdup("esc");
+    tmp.theme = g_strdup("auto");
+    ibus_lotus_load_user_config(&tmp);
+    if (item_id == 1) {
+        tmp.enabled = !tmp.enabled;
+    } else {
+        sni_mutate_engine_for_item(&tmp, item_id);
+    }
+    ibus_lotus_save_user_config(&tmp);
+    g_free(tmp.output_mode);
+    g_free(tmp.im_framework);
+    g_free(tmp.ui_lang);
+    g_free(tmp.icon_style);
+    g_free(tmp.flag_variant);
+    g_free(tmp.restore_key);
+    g_free(tmp.theme);
+    if (tmp.session) lotuskey_destroy_session(tmp.session);
+    ibus_lotus_sni_notify_update();
+}
+
+static void sni_fill_menu_item_props(gint id, GVariantBuilder *props) {
+    gboolean is_en = (g_sni_fallback_lang && strcmp(g_sni_fallback_lang, "en") == 0);
+    const char *st = g_sni_fallback_icon_style ? g_sni_fallback_icon_style : "flag";
+    const char *fv = g_sni_fallback_flag_var ? g_sni_fallback_flag_var : "us";
+    const char *out_m = g_sni_fallback_output_mode ? g_sni_fallback_output_mode : "preedit";
+
+    if (id == 0) {
+        g_variant_builder_add(props, "{sv}", "children-display", g_variant_new_string("submenu"));
+        return;
+    }
+    if (id == 100 || id == 101) {
+        g_variant_builder_add(props, "{sv}", "type", g_variant_new_string("separator"));
+        g_variant_builder_add(props, "{sv}", "visible", g_variant_new_boolean(TRUE));
+        return;
+    }
+
+    gboolean is_cs_comb = (g_sni_fallback_charset == LOTUS_CHARSET_COMBINING_CFG || g_sni_fallback_charset == LOTUS_CHARSET_COMBINING_ENUM);
+    gboolean is_cs_tcvn = (g_sni_fallback_charset == LOTUS_CHARSET_TCVN3_CFG || g_sni_fallback_charset == LOTUS_CHARSET_TCVN3_ENUM);
+    gboolean is_cs_vni  = (g_sni_fallback_charset == LOTUS_CHARSET_VNI_WIN_CFG || g_sni_fallback_charset == LOTUS_CHARSET_VNI_WIN_ENUM);
+    gboolean is_cs_uni  = (!is_cs_comb && !is_cs_tcvn && !is_cs_vni);
+
+    gboolean is_out_surr = (strcmp(out_m, "surrounding") == 0);
+    gboolean is_out_fwd  = (strcmp(out_m, "forward") == 0);
+    gboolean is_out_pre  = (!is_out_surr && !is_out_fwd);
+
+    gboolean ic_flag_us = (strcmp(st, "flag") == 0 && strcmp(fv, "uk") != 0);
+    gboolean ic_flag_uk = (strcmp(st, "flag") == 0 && strcmp(fv, "uk") == 0);
+    gboolean ic_badge   = (strcmp(st, "badge") == 0);
+    gboolean ic_lotus   = (strcmp(st, "lotus") == 0);
+    gboolean ic_symb    = (strcmp(st, "symbolic") == 0);
+
+    char label_buf[128] = {0};
+    const char *label = label_buf;
+    const char *toggle_type = NULL;
+    gboolean checked = FALSE;
+    gboolean is_submenu_parent = FALSE;
+
+    switch (id) {
+        case 1:
+            label = is_en
+                ? (g_sni_fallback_enabled ? "Vietnamese: ON (Click to switch EN)" : "English: OFF (Click to switch VN)")
+                : (g_sni_fallback_enabled ? "Tiếng Việt: BẬT (Click chuyển Anh)" : "Tiếng Anh: TẮT (Click chuyển Việt)");
+            toggle_type = "checkmark";
+            checked = g_sni_fallback_enabled;
+            break;
+        /* Submenu 20: Input Method */
+        case 20: {
+            const char *im_s = (g_sni_fallback_im == IM_VNI) ? "VNI" : ((g_sni_fallback_im == IM_TELEX_VNI) ? "Telex+VNI" : "Telex");
+            snprintf(label_buf, sizeof(label_buf), "%s: %s", is_en ? "Input Method" : "Kiểu gõ", im_s);
+            is_submenu_parent = TRUE;
+            break;
+        }
+        case 21:
+            label = "Telex";
+            toggle_type = "radio";
+            checked = (g_sni_fallback_im == IM_TELEX);
+            break;
+        case 22:
+            label = "VNI";
+            toggle_type = "radio";
+            checked = (g_sni_fallback_im == IM_VNI);
+            break;
+        case 23:
+            label = "Telex + VNI";
+            toggle_type = "radio";
+            checked = (g_sni_fallback_im == IM_TELEX_VNI);
+            break;
+        /* Submenu 30: Charset */
+        case 30: {
+            const char *cs_s = is_en
+                ? (is_cs_comb ? "Combining" : (is_cs_tcvn ? "TCVN3" : (is_cs_vni ? "VNI Win" : "Unicode")))
+                : (is_cs_comb ? "Tổ hợp" : (is_cs_tcvn ? "TCVN3" : (is_cs_vni ? "VNI Win" : "Unicode")));
+            snprintf(label_buf, sizeof(label_buf), "%s: %s", is_en ? "Charset" : "Bảng mã", cs_s);
+            is_submenu_parent = TRUE;
+            break;
+        }
+        case 31:
+            label = is_en ? "Unicode (Precomposed NFC)" : "Unicode dựng sẵn (NFC)";
+            toggle_type = "radio";
+            checked = is_cs_uni;
+            break;
+        case 32:
+            label = is_en ? "Unicode (Combining NFD)" : "Unicode tổ hợp (NFD)";
+            toggle_type = "radio";
+            checked = is_cs_comb;
+            break;
+        case 33:
+            label = "TCVN3 (ABC)";
+            toggle_type = "radio";
+            checked = is_cs_tcvn;
+            break;
+        case 34:
+            label = "VNI Windows";
+            toggle_type = "radio";
+            checked = is_cs_vni;
+            break;
+        /* Submenu 40: Typing Options */
+        case 40:
+            label = is_en ? "Typing Options" : "Tùy chọn gõ";
+            is_submenu_parent = TRUE;
+            break;
+        case 41:
+            label = is_en ? "Auto-restore English words" : "Tự khôi phục từ tiếng Anh";
+            toggle_type = "checkmark";
+            checked = g_sni_fallback_smart_bilingual;
+            break;
+        case 42:
+            label = is_en ? "Modern tone placement (oà, uý)" : "Đặt dấu kiểu mới (oà, uý)";
+            toggle_type = "checkmark";
+            checked = g_sni_fallback_modern_orthography;
+            break;
+        case 43:
+            label = is_en ? "Free tone marking (SEN Flex)" : "Bỏ dấu tự do (SEN Flex)";
+            toggle_type = "checkmark";
+            checked = g_sni_fallback_sen_flex;
+            break;
+        case 44:
+            label = is_en ? "Enable Macros (Shortcuts)" : "Bật gõ tắt (Macro)";
+            toggle_type = "checkmark";
+            checked = g_sni_fallback_macro_enabled;
+            break;
+        case 45:
+            label = is_en ? "Convert initial W to Ư" : "Đổi W thành Ư ở đầu từ";
+            toggle_type = "checkmark";
+            checked = g_sni_fallback_w2u;
+            break;
+        /* Submenu 50: Output Mode */
+        case 50: {
+            const char *out_s = is_out_surr ? "Surrounding" : (is_out_fwd ? "Forward" : "Pre-edit");
+            snprintf(label_buf, sizeof(label_buf), "%s: %s", is_en ? "Output Mode" : "Chế độ xuất chữ", out_s);
+            is_submenu_parent = TRUE;
+            break;
+        }
+        case 51:
+            label = is_en ? "Pre-edit (Recommended)" : "Pre-edit (Mặc định)";
+            toggle_type = "radio";
+            checked = is_out_pre;
+            break;
+        case 52:
+            label = "Surrounding Text";
+            toggle_type = "radio";
+            checked = is_out_surr;
+            break;
+        case 53:
+            label = "Forward Backspace";
+            toggle_type = "radio";
+            checked = is_out_fwd;
+            break;
+        /* Submenu 60: Icon Style */
+        case 60: {
+            const char *ic_s = is_en
+                ? (ic_flag_uk ? "Flag VN/UK" : (ic_badge ? "V/E Badge" : (ic_lotus ? "Lotus" : (ic_symb ? "Symbolic" : "Flag VN/US"))))
+                : (ic_flag_uk ? "Cờ VN/UK" : (ic_badge ? "Chữ V/E" : (ic_lotus ? "Hoa sen" : (ic_symb ? "Đơn sắc" : "Cờ VN/US"))));
+            snprintf(label_buf, sizeof(label_buf), "%s: %s", is_en ? "Icon Style" : "Biểu tượng", ic_s);
+            is_submenu_parent = TRUE;
+            break;
+        }
+        case 61:
+            label = is_en ? "Flat Flag VN / US" : "Cờ phẳng VN / US";
+            toggle_type = "radio";
+            checked = ic_flag_us;
+            break;
+        case 62:
+            label = is_en ? "Flat Flag VN / UK" : "Cờ phẳng VN / UK";
+            toggle_type = "radio";
+            checked = ic_flag_uk;
+            break;
+        case 63:
+            label = is_en ? "V / E Badge (UniKey)" : "Chữ V / E (UniKey)";
+            toggle_type = "radio";
+            checked = ic_badge;
+            break;
+        case 64:
+            label = is_en ? "Lotus Flower" : "Hoa sen LotusKey";
+            toggle_type = "radio";
+            checked = ic_lotus;
+            break;
+        case 65:
+            label = is_en ? "Monochrome Symbolic" : "Đơn sắc (Symbolic)";
+            toggle_type = "radio";
+            checked = ic_symb;
+            break;
+        /* Action items */
+        case 10:
+            label = is_en ? "Clipboard Charset Converter..." : "Chuyển mã Clipboard...";
+            break;
+        case 11:
+            label = is_en ? "Quick Menu (` key)..." : "Menu nhanh (Phím `)...";
+            break;
+        case 12:
+            label = is_en ? "LotusKey Settings..." : "Cài đặt LotusKey...";
+            break;
+        default:
+            break;
+    }
+
+    g_variant_builder_add(props, "{sv}", "type", g_variant_new_string("standard"));
+    g_variant_builder_add(props, "{sv}", "label", g_variant_new_string(label));
+    g_variant_builder_add(props, "{sv}", "enabled", g_variant_new_boolean(TRUE));
+    g_variant_builder_add(props, "{sv}", "visible", g_variant_new_boolean(TRUE));
+    if (is_submenu_parent) {
+        g_variant_builder_add(props, "{sv}", "children-display", g_variant_new_string("submenu"));
+    }
+    if (toggle_type != NULL) {
+        g_variant_builder_add(props, "{sv}", "toggle-type", g_variant_new_string(toggle_type));
+        g_variant_builder_add(props, "{sv}", "toggle-state", g_variant_new_int32(checked ? 1 : 0));
+    }
+}
+
+static GVariant *sni_build_menu_node(gint id, gboolean include_children) {
+    GVariantBuilder props;
+    g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+    sni_fill_menu_item_props(id, &props);
+
+    GVariantBuilder children;
+    g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+
+    static const gint root_ids[] = { 1, 100, 20, 30, 40, 50, 60, 101, 10, 11, 12 };
+    static const gint im_ids[]   = { 21, 22, 23 };
+    static const gint cs_ids[]   = { 31, 32, 33, 34 };
+    static const gint opt_ids[]  = { 41, 42, 43, 44, 45 };
+    static const gint out_ids[]  = { 51, 52, 53 };
+    static const gint ic_ids[]   = { 61, 62, 63, 64, 65 };
+
+    const gint *child_ids = NULL;
+    size_t child_count = 0;
+
+    if (include_children) {
+        switch (id) {
+            case 0:
+                child_ids = root_ids;
+                child_count = sizeof(root_ids) / sizeof(root_ids[0]);
+                break;
+            case 20:
+                child_ids = im_ids;
+                child_count = sizeof(im_ids) / sizeof(im_ids[0]);
+                break;
+            case 30:
+                child_ids = cs_ids;
+                child_count = sizeof(cs_ids) / sizeof(cs_ids[0]);
+                break;
+            case 40:
+                child_ids = opt_ids;
+                child_count = sizeof(opt_ids) / sizeof(opt_ids[0]);
+                break;
+            case 50:
+                child_ids = out_ids;
+                child_count = sizeof(out_ids) / sizeof(out_ids[0]);
+                break;
+            case 60:
+                child_ids = ic_ids;
+                child_count = sizeof(ic_ids) / sizeof(ic_ids[0]);
+                break;
+            default:
+                break;
+        }
+    }
+
+    for (size_t i = 0; i < child_count; i++) {
+        GVariant *child_node = sni_build_menu_node(child_ids[i], TRUE);
+        g_variant_builder_add(&children, "v", child_node);
+    }
+
+    return g_variant_new("(ia{sv}av)", id, &props, &children);
+}
+
+static void on_sni_method_call(GDBusConnection *conn, const gchar *sender, const gchar *object_path,
+                               const gchar *interface_name, const gchar *method_name,
+                               GVariant *parameters, GDBusMethodInvocation *invocation, gpointer user_data) {
+    (void)conn; (void)sender; (void)object_path; (void)interface_name; (void)parameters; (void)user_data;
+    if (g_strcmp0(method_name, "Activate") == 0 ||
+        g_strcmp0(method_name, "SecondaryActivate") == 0 ||
+        g_strcmp0(method_name, "XAyatanaSecondaryActivate") == 0 ||
+        g_strcmp0(method_name, "Scroll") == 0) {
+        sni_apply_menu_action(1);
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+        return;
+    }
+    if (g_strcmp0(method_name, "ContextMenu") == 0) {
+        ibus_lotus_spawn_tool("lotuskey-menu");
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+        return;
+    }
+    if (g_strcmp0(method_name, "ProvideXdgActivationToken") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+        return;
+    }
+    g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+}
+
+static GVariant *on_sni_get_property(GDBusConnection *conn, const gchar *sender, const gchar *object_path,
+                                     const gchar *interface_name, const gchar *property_name,
+                                     GError **error, gpointer user_data) {
+    (void)conn; (void)sender; (void)object_path; (void)interface_name; (void)error; (void)user_data;
+    if (g_strcmp0(property_name, "Category") == 0) return g_variant_new_string("ApplicationStatus");
+    if (g_strcmp0(property_name, "Id") == 0) return g_variant_new_string("lotuskey");
+    if (g_strcmp0(property_name, "Title") == 0) return g_variant_new_string("LotusKey");
+    if (g_strcmp0(property_name, "Status") == 0) return g_variant_new_string("Active");
+    if (g_strcmp0(property_name, "WindowId") == 0) return g_variant_new_int32(0);
+    if (g_strcmp0(property_name, "IconThemePath") == 0) return g_variant_new_string("");
+    if (g_strcmp0(property_name, "Menu") == 0) return g_variant_new_object_path("/StatusNotifierMenu");
+    if (g_strcmp0(property_name, "ItemIsMenu") == 0) return g_variant_new_boolean(FALSE);
+    if (g_strcmp0(property_name, "IconName") == 0) {
+        gchar *icon_p = sni_get_current_icon_path();
+        GVariant *ret = g_variant_new_string(icon_p ? icon_p : "input-keyboard");
+        g_free(icon_p);
+        return ret;
+    }
+    if (g_strcmp0(property_name, "IconPixmap") == 0 ||
+        g_strcmp0(property_name, "OverlayIconPixmap") == 0 ||
+        g_strcmp0(property_name, "AttentionIconPixmap") == 0) {
+        return g_variant_new_array(G_VARIANT_TYPE("(iiay)"), NULL, 0);
+    }
+    return g_variant_new_string("");
+}
+
+static void on_dbusmenu_method_call(GDBusConnection *conn, const gchar *sender, const gchar *object_path,
+                                    const gchar *interface_name, const gchar *method_name,
+                                    GVariant *parameters, GDBusMethodInvocation *invocation, gpointer user_data) {
+    (void)conn; (void)sender; (void)object_path; (void)interface_name; (void)user_data;
+    if (g_strcmp0(method_name, "GetLayout") == 0) {
+        gint parent_id = 0;
+        gint recursion_depth = -1;
+        g_variant_get(parameters, "(ii^as)", &parent_id, &recursion_depth, NULL);
+        sni_sync_fallback_from_config();
+        GVariant *layout = sni_build_menu_node(parent_id, recursion_depth != 0);
+        g_dbus_method_invocation_return_value(
+            invocation,
+            g_variant_new("(u@(ia{sv}av))", g_sni_menu_revision, layout)
+        );
+        return;
+    }
+    if (g_strcmp0(method_name, "GetGroupProperties") == 0) {
+        GVariantIter *id_iter = NULL;
+        g_variant_get(parameters, "(ai^as)", &id_iter, NULL);
+        sni_sync_fallback_from_config();
+        GVariantBuilder res;
+        g_variant_builder_init(&res, G_VARIANT_TYPE("a(ia{sv})"));
+        gint id = 0;
+        while (g_variant_iter_loop(id_iter, "i", &id)) {
+            GVariantBuilder props;
+            g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+            sni_fill_menu_item_props(id, &props);
+            g_variant_builder_add(&res, "(ia{sv})", id, &props);
+        }
+        g_variant_iter_free(id_iter);
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(a(ia{sv}))", &res));
+        return;
+    }
+    if (g_strcmp0(method_name, "GetProperty") == 0) {
+        gint id = 0;
+        const gchar *name = NULL;
+        g_variant_get(parameters, "(i&s)", &id, &name);
+        sni_sync_fallback_from_config();
+        GVariantBuilder props;
+        g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+        sni_fill_menu_item_props(id, &props);
+        GVariant *dict = g_variant_ref_sink(g_variant_builder_end(&props));
+        GVariant *val = name ? g_variant_lookup_value(dict, name, NULL) : NULL;
+        GVariant *ret_tuple = g_variant_new("(v)", val ? val : g_variant_new_string(""));
+        if (val) {
+            g_variant_unref(val);
+        }
+        g_variant_unref(dict);
+        g_dbus_method_invocation_return_value(invocation, ret_tuple);
+        return;
+    }
+    if (g_strcmp0(method_name, "Event") == 0) {
+        gint id = 0;
+        const gchar *event_id = NULL;
+        GVariant *data = NULL;
+        guint32 ts = 0;
+        g_variant_get(parameters, "(i&svu)", &id, &event_id, &data, &ts);
+        if (data) g_variant_unref(data);
+        if (g_strcmp0(event_id, "clicked") == 0 && sni_is_action_item_id(id)) {
+            sni_apply_menu_action(id);
+        }
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+        return;
+    }
+    if (g_strcmp0(method_name, "EventGroup") == 0) {
+        GVariantIter *ev_iter = NULL;
+        g_variant_get(parameters, "(a(isvu))", &ev_iter);
+        gint id = 0;
+        gchar *event_id = NULL;
+        GVariant *data = NULL;
+        guint32 ts = 0;
+        while (g_variant_iter_loop(ev_iter, "(isvu)", &id, &event_id, &data, &ts)) {
+            if (g_strcmp0(event_id, "clicked") == 0 && sni_is_action_item_id(id)) {
+                sni_apply_menu_action(id);
+            }
+        }
+        g_variant_iter_free(ev_iter);
+        GVariantBuilder err_ids;
+        g_variant_builder_init(&err_ids, G_VARIANT_TYPE("ai"));
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(ai)", &err_ids));
+        return;
+    }
+    if (g_strcmp0(method_name, "AboutToShow") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", FALSE));
+        return;
+    }
+    if (g_strcmp0(method_name, "AboutToShowGroup") == 0) {
+        GVariantBuilder b1, b2;
+        g_variant_builder_init(&b1, G_VARIANT_TYPE("ai"));
+        g_variant_builder_init(&b2, G_VARIANT_TYPE("ai"));
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(aiai)", &b1, &b2));
+        return;
+    }
+}
+
+static GVariant *on_dbusmenu_get_property(GDBusConnection *conn, const gchar *sender, const gchar *object_path,
+                                          const gchar *interface_name, const gchar *property_name,
+                                          GError **error, gpointer user_data) {
+    (void)conn; (void)sender; (void)object_path; (void)interface_name; (void)error; (void)user_data;
+    if (g_strcmp0(property_name, "Version") == 0) return g_variant_new_uint32(3);
+    if (g_strcmp0(property_name, "TextDirection") == 0) return g_variant_new_string("ltr");
+    if (g_strcmp0(property_name, "Status") == 0) return g_variant_new_string("normal");
+    if (g_strcmp0(property_name, "IconThemePath") == 0) return g_variant_new_array(G_VARIANT_TYPE_STRING, NULL, 0);
+    return g_variant_new_string("");
+}
+
+static void ibus_lotus_sni_notify_update(void) {
+    if (!g_sni_conn) return;
+    g_sni_menu_revision++;
+    gchar *icon_p = sni_get_current_icon_path();
+
+    GVariantBuilder changed;
+    g_variant_builder_init(&changed, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&changed, "{sv}", "IconName", g_variant_new_string(icon_p ? icon_p : "input-keyboard"));
+    g_variant_builder_add(&changed, "{sv}", "Status", g_variant_new_string("Active"));
+    GVariantBuilder invalidated;
+    g_variant_builder_init(&invalidated, G_VARIANT_TYPE("as"));
+
+    g_dbus_connection_emit_signal(
+        g_sni_conn, NULL, "/StatusNotifierItem",
+        "org.freedesktop.DBus.Properties", "PropertiesChanged",
+        g_variant_new("(sa{sv}as)", "org.kde.StatusNotifierItem", &changed, &invalidated),
+        NULL
+    );
+    g_dbus_connection_emit_signal(
+        g_sni_conn, NULL, "/StatusNotifierItem",
+        "org.kde.StatusNotifierItem", "NewIcon",
+        NULL, NULL
+    );
+    g_dbus_connection_emit_signal(
+        g_sni_conn, NULL, "/StatusNotifierMenu",
+        "com.canonical.dbusmenu", "LayoutUpdated",
+        g_variant_new("(ui)", g_sni_menu_revision, 0),
+        NULL
+    );
+    g_free(icon_p);
+}
+
+static void register_with_sni_watcher(GDBusConnection *conn) {
+    const gchar *unique_name = g_dbus_connection_get_unique_name(conn);
+    if (!unique_name) return;
+    g_dbus_connection_call(
+        conn,
+        "org.kde.StatusNotifierWatcher",
+        "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher",
+        "RegisterStatusNotifierItem",
+        g_variant_new("(s)", unique_name),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        1000,
+        NULL,
+        NULL,
+        NULL
+    );
+}
+
+static void on_sni_watcher_appeared(GDBusConnection *conn, const gchar *name, const gchar *name_owner, gpointer user_data) {
+    (void)name; (void)name_owner; (void)user_data;
+    register_with_sni_watcher(conn);
+}
+
+static void setup_sni_tray_indicator(void) {
+    g_sni_conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!g_sni_conn) return;
+
+    static const gchar sni_xml[] =
+        "<node>"
+        "  <interface name='org.kde.StatusNotifierItem'>"
+        "    <property name='Category' type='s' access='read'/>"
+        "    <property name='Id' type='s' access='read'/>"
+        "    <property name='Title' type='s' access='read'/>"
+        "    <property name='Status' type='s' access='read'/>"
+        "    <property name='WindowId' type='i' access='read'/>"
+        "    <property name='IconThemePath' type='s' access='read'/>"
+        "    <property name='Menu' type='o' access='read'/>"
+        "    <property name='ItemIsMenu' type='b' access='read'/>"
+        "    <property name='IconName' type='s' access='read'/>"
+        "    <property name='IconPixmap' type='a(iiay)' access='read'/>"
+        "    <property name='OverlayIconName' type='s' access='read'/>"
+        "    <property name='OverlayIconPixmap' type='a(iiay)' access='read'/>"
+        "    <property name='AttentionIconName' type='s' access='read'/>"
+        "    <property name='AttentionIconPixmap' type='a(iiay)' access='read'/>"
+        "    <property name='AttentionMovieName' type='s' access='read'/>"
+        "    <method name='ContextMenu'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
+        "    <method name='Activate'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
+        "    <method name='ProvideXdgActivationToken'><arg name='token' type='s' direction='in'/></method>"
+        "    <method name='SecondaryActivate'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
+        "    <method name='XAyatanaSecondaryActivate'><arg name='timestamp' type='u' direction='in'/></method>"
+        "    <method name='Scroll'><arg name='delta' type='i' direction='in'/><arg name='orientation' type='s' direction='in'/></method>"
+        "    <signal name='NewTitle'/>"
+        "    <signal name='NewIcon'/>"
+        "    <signal name='NewAttentionIcon'/>"
+        "    <signal name='NewOverlayIcon'/>"
+        "    <signal name='NewToolTip'/>"
+        "    <signal name='NewStatus'><arg name='status' type='s'/></signal>"
+        "  </interface>"
+        "</node>";
+
+    static const gchar dbusmenu_xml[] =
+        "<node>"
+        "  <interface name='com.canonical.dbusmenu'>"
+        "    <property name='Version' type='u' access='read'/>"
+        "    <property name='TextDirection' type='s' access='read'/>"
+        "    <property name='Status' type='s' access='read'/>"
+        "    <property name='IconThemePath' type='as' access='read'/>"
+        "    <method name='GetLayout'>"
+        "      <arg type='i' name='parentId' direction='in'/>"
+        "      <arg type='i' name='recursionDepth' direction='in'/>"
+        "      <arg type='as' name='propertyNames' direction='in'/>"
+        "      <arg type='u' name='revision' direction='out'/>"
+        "      <arg type='(ia{sv}av)' name='layout' direction='out'/>"
+        "    </method>"
+        "    <method name='GetGroupProperties'>"
+        "      <arg type='ai' name='ids' direction='in'/>"
+        "      <arg type='as' name='propertyNames' direction='in'/>"
+        "      <arg type='a(ia{sv})' name='properties' direction='out'/>"
+        "    </method>"
+        "    <method name='GetProperty'>"
+        "      <arg type='i' name='id' direction='in'/>"
+        "      <arg type='s' name='name' direction='in'/>"
+        "      <arg type='v' name='value' direction='out'/>"
+        "    </method>"
+        "    <method name='Event'>"
+        "      <arg type='i' name='id' direction='in'/>"
+        "      <arg type='s' name='eventId' direction='in'/>"
+        "      <arg type='v' name='data' direction='in'/>"
+        "      <arg type='u' name='timestamp' direction='in'/>"
+        "    </method>"
+        "    <method name='EventGroup'>"
+        "      <arg type='a(isvu)' name='events' direction='in'/>"
+        "      <arg type='ai' name='idErrors' direction='out'/>"
+        "    </method>"
+        "    <method name='AboutToShow'>"
+        "      <arg type='i' name='id' direction='in'/>"
+        "      <arg type='b' name='needUpdate' direction='out'/>"
+        "    </method>"
+        "    <method name='AboutToShowGroup'>"
+        "      <arg type='ai' name='ids' direction='in'/>"
+        "      <arg type='ai' name='updatesNeeded' direction='out'/>"
+        "      <arg type='ai' name='idErrors' direction='out'/>"
+        "    </method>"
+        "    <signal name='ItemsPropertiesUpdated'>"
+        "      <arg type='a(ia{sv})' name='updatedProps' direction='out'/>"
+        "      <arg type='a(ias)' name='removedProps' direction='out'/>"
+        "    </signal>"
+        "    <signal name='LayoutUpdated'>"
+        "      <arg type='u' name='revision' direction='out'/>"
+        "      <arg type='i' name='parent' direction='out'/>"
+        "    </signal>"
+        "  </interface>"
+        "</node>";
+
+    static const GDBusInterfaceVTable sni_vtable = {
+        on_sni_method_call,
+        on_sni_get_property,
+        NULL,
+        { 0 }
+    };
+    static const GDBusInterfaceVTable dbusmenu_vtable = {
+        on_dbusmenu_method_call,
+        on_dbusmenu_get_property,
+        NULL,
+        { 0 }
+    };
+
+    GDBusNodeInfo *sni_node = g_dbus_node_info_new_for_xml(sni_xml, NULL);
+    if (sni_node) {
+        g_dbus_connection_register_object(
+            g_sni_conn, "/StatusNotifierItem",
+            sni_node->interfaces[0], &sni_vtable, NULL, NULL, NULL
+        );
+        g_dbus_node_info_unref(sni_node);
+    }
+
+    GDBusNodeInfo *menu_node = g_dbus_node_info_new_for_xml(dbusmenu_xml, NULL);
+    if (menu_node) {
+        g_dbus_connection_register_object(
+            g_sni_conn, "/StatusNotifierMenu",
+            menu_node->interfaces[0], &dbusmenu_vtable, NULL, NULL, NULL
+        );
+        g_dbus_node_info_unref(menu_node);
+    }
+
+    g_bus_watch_name_on_connection(
+        g_sni_conn,
+        "org.kde.StatusNotifierWatcher",
+        G_BUS_NAME_WATCHER_FLAGS_NONE,
+        on_sni_watcher_appeared,
+        NULL,
+        NULL,
+        NULL
+    );
 }
 
 static void setup_config_monitors(void) {
@@ -1599,6 +3073,7 @@ int main(int argc, char **argv) {
     ibus_init();
     ibus_lotus_reload_macros();
     setup_config_monitors();
+    setup_sni_tray_indicator();
     g_unix_signal_add(SIGUSR1, on_sigusr1_unix_signal, NULL);
 
     IBusBus *bus = NULL;
@@ -1630,14 +3105,41 @@ int main(int argc, char **argv) {
     } else {
         const gchar *home = g_get_home_dir();
         gchar *user_xml = home ? g_build_filename(home, ".local", "share", "ibus", "component", "lotuskey.xml", NULL) : NULL;
+        gchar *rel_xml = NULL;
+        if (!user_xml || !g_file_test(user_xml, G_FILE_TEST_EXISTS)) {
+            char self_path[PATH_MAX];
+            ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+            if (len > 0) {
+                self_path[len] = '\0';
+                gchar *bin_dir = g_path_get_dirname(self_path);
+                gchar *parent_dir = g_path_get_dirname(bin_dir);
+                gchar *prefix_dir = g_path_get_dirname(parent_dir);
+                gchar *cand1 = g_build_filename(prefix_dir, "share", "ibus", "component", "lotuskey.xml", NULL);
+                gchar *cand2 = g_build_filename(parent_dir, "engine", "lotuskey.xml", NULL);
+                g_free(bin_dir);
+                g_free(parent_dir);
+                g_free(prefix_dir);
+                if (g_file_test(cand1, G_FILE_TEST_EXISTS)) {
+                    rel_xml = cand1;
+                    g_free(cand2);
+                } else if (g_file_test(cand2, G_FILE_TEST_EXISTS)) {
+                    rel_xml = cand2;
+                    g_free(cand1);
+                } else {
+                    g_free(cand1);
+                    g_free(cand2);
+                }
+            }
+        }
         const gchar *xml_path = (user_xml && g_file_test(user_xml, G_FILE_TEST_EXISTS))
             ? user_xml
-            : "/usr/share/ibus/component/lotuskey.xml";
+            : (rel_xml ? rel_xml : "/usr/share/ibus/component/lotuskey.xml");
         IBusComponent *component = ibus_component_new_from_file(xml_path);
         if (component) {
             ibus_bus_register_component(bus, component);
         }
-        if (user_xml) g_free(user_xml);
+        g_free(user_xml);
+        g_free(rel_xml);
     }
 
     ibus_main();

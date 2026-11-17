@@ -3,75 +3,84 @@
 """
 LotusKey - Quick Menu Dialog
 Floating dialog triggered by pressing ` (grave) or via shortcut.
-Supports Vietnamese and English UI.
+Features Flat Flag SVG preview, Icon Style quick switcher, Unified Theme (Auto/Dark/Light),
+and 1-click access to Clipboard Converter and Full Settings.
 """
 
 import os
+import subprocess
 import sys
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from config.config_manager import load_config, save_config
+from config.distro_adapter import DistroAdapter
 from config.i18n import normalize_lang, tr
 from config.im_framework import apply_framework_config, resolve_effective_framework
 
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
-CSS_DATA = b"""
+CSS_DARK = b"""
 window.quick-dialog {
     background-color: #1a1b26;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #c0caf5;
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 14px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
-
 .lotus-title {
     font-size: 15px;
     font-weight: 700;
     color: #c0caf5;
     margin-bottom: 2px;
 }
-
 .lotus-subtitle {
     font-size: 11px;
     color: #7aa2f7;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
 }
-
 .section-label {
     font-size: 11px;
     font-weight: 600;
-    color: #565f89;
+    color: #7dcfff;
     margin-top: 6px;
     margin-bottom: 4px;
 }
-
 button.mode-btn {
     background: #24283b;
     color: #a9b1d6;
     border: 1px solid #414868;
     border-radius: 8px;
-    padding: 5px 12px;
+    padding: 5px 10px;
     font-size: 12px;
     font-weight: 500;
 }
-
 button.mode-btn:hover {
     background: #2ac3de;
     color: #1a1b26;
 }
-
 button.mode-btn.active {
     background: #7aa2f7;
     color: #1a1b26;
     font-weight: 700;
     border-color: #7aa2f7;
 }
-
+combobox button {
+    background: #24283b;
+    background-image: none;
+    color: #c0caf5;
+    border: 1px solid #414868;
+    border-radius: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+combobox button:hover {
+    border-color: #7aa2f7;
+}
 button.lang-btn {
     background: #24283b;
     color: #c0caf5;
@@ -81,24 +90,98 @@ button.lang-btn {
     font-size: 11px;
     font-weight: 600;
 }
-
 checkbutton {
     color: #c0caf5;
     font-size: 12px;
     margin-top: 2px;
     margin-bottom: 2px;
 }
-
-checkbutton:hover {
-    color: #7aa2f7;
-}
-
 .hint-bar {
     font-size: 11px;
     color: #565f89;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
     padding-top: 8px;
-    margin-top: 8px;
+    margin-top: 6px;
+}
+"""
+
+CSS_LIGHT = b"""
+window.quick-dialog {
+    background-color: #f8f9fc;
+    color: #1e293b;
+    border: 1px solid rgba(0, 0, 0, 0.16);
+    border-radius: 14px;
+}
+.lotus-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #1e293b;
+    margin-bottom: 2px;
+}
+.lotus-subtitle {
+    font-size: 11px;
+    color: #d81b60;
+    margin-bottom: 8px;
+}
+.section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #475569;
+    margin-top: 6px;
+    margin-bottom: 4px;
+}
+button.mode-btn {
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+button.mode-btn:hover {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+button.mode-btn.active {
+    background: #d81b60;
+    color: #ffffff;
+    font-weight: 700;
+    border-color: #d81b60;
+}
+combobox button {
+    background: #ffffff;
+    background-image: none;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+combobox button:hover {
+    border-color: #d81b60;
+}
+button.lang-btn {
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+}
+checkbutton {
+    color: #1e293b;
+    font-size: 12px;
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+.hint-bar {
+    font-size: 11px;
+    color: #64748b;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    padding-top: 8px;
+    margin-top: 6px;
 }
 """
 
@@ -109,6 +192,7 @@ class QuickMenuDialog(Gtk.Window):
         self.on_config_changed = on_config_changed
         self.cfg = load_config()
         self.lang = normalize_lang(self.cfg.get("ui_lang", "vi"))
+        self._updating_ui = False
 
         self.set_title(tr(self.lang, "quick_menu_title"))
         self.set_position(Gtk.WindowPosition.CENTER)
@@ -118,9 +202,28 @@ class QuickMenuDialog(Gtk.Window):
         self.set_skip_pager_hint(True)
         self.set_keep_above(True)
 
+        theme_mode = str(self.cfg.get("theme", "auto")).lower()
+        settings = Gtk.Settings.get_default()
+        if theme_mode == "dark":
+            use_dark = True
+            if settings:
+                settings.set_property("gtk-application-prefer-dark-theme", True)
+        elif theme_mode == "light":
+            use_dark = False
+            if settings:
+                settings.set_property("gtk-application-prefer-dark-theme", False)
+        else:
+            prefer_dark = False
+            if settings:
+                prefer_dark = bool(settings.get_property("gtk-application-prefer-dark-theme"))
+                tname = str(settings.get_property("gtk-theme-name") or "").lower()
+                if "dark" in tname:
+                    prefer_dark = True
+            use_dark = prefer_dark
+
         screen = Gdk.Screen.get_default()
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS_DATA)
+        provider.load_from_data(CSS_DARK if use_dark else CSS_LIGHT)
         Gtk.StyleContext.add_provider_for_screen(
             screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
@@ -145,7 +248,11 @@ class QuickMenuDialog(Gtk.Window):
         self.root_box.pack_start(main_box, True, True, 0)
 
         eff_fw = resolve_effective_framework(self.cfg.get("im_framework", "auto")).upper()
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        self.hdr_icon = Gtk.Image()
+        header_box.pack_start(self.hdr_icon, False, False, 0)
+
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         lbl_title = Gtk.Label(label="LotusKey", xalign=0)
         lbl_title.get_style_context().add_class("lotus-title")
@@ -178,14 +285,14 @@ class QuickMenuDialog(Gtk.Window):
         self.sw_enable.connect("notify::active", self._on_enable_toggled)
         switch_box.pack_start(lbl_enable, True, True, 0)
         switch_box.pack_end(self.sw_enable, False, False, 0)
-        main_box.pack_start(switch_box, False, False, 4)
+        main_box.pack_start(switch_box, False, False, 2)
 
-        # Input Method
+        # 1. Input Method (3 Pill Buttons on 1 row)
+        im_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         lbl_im = Gtk.Label(label=f"{tr(self.lang, 'qm_input_method')}:", xalign=0)
         lbl_im.get_style_context().add_class("section-label")
-        main_box.pack_start(lbl_im, False, False, 0)
+        lbl_im.set_margin_end(4)
 
-        im_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.btn_telex = Gtk.Button(label=tr(self.lang, "im_telex"))
         self.btn_telex.get_style_context().add_class("mode-btn")
         self.btn_telex.connect("clicked", lambda w: self._set_im(0))
@@ -198,100 +305,193 @@ class QuickMenuDialog(Gtk.Window):
         self.btn_telex_vni.get_style_context().add_class("mode-btn")
         self.btn_telex_vni.connect("clicked", lambda w: self._set_im(2))
 
+        im_box.pack_start(lbl_im, False, False, 0)
         im_box.pack_start(self.btn_telex, True, True, 0)
         im_box.pack_start(self.btn_vni, True, True, 0)
         im_box.pack_start(self.btn_telex_vni, True, True, 0)
         main_box.pack_start(im_box, False, False, 2)
 
-        # Framework Backend
+        # 2. Grid 2x2 Dropdowns (Charset, Output Mode, Tray Icon Style, Framework)
+        combo_grid = Gtk.Grid()
+        combo_grid.set_row_spacing(6)
+        combo_grid.set_column_spacing(8)
+        combo_grid.set_margin_top(4)
+        combo_grid.set_margin_bottom(2)
+
+        lbl_cs = Gtk.Label(label=f"{tr(self.lang, 'qm_charset')}:", xalign=0)
+        lbl_cs.get_style_context().add_class("section-label")
+        self.combo_cs = Gtk.ComboBoxText()
+        for cid, label_key in [
+            ("0", "qm_cs_unicode"),
+            ("31", "qm_cs_combining"),
+            ("27", "cs_tcvn3"),
+            ("34", "cs_vni_win"),
+        ]:
+            self.combo_cs.append(cid, tr(self.lang, label_key))
+        self.combo_cs.set_hexpand(True)
+        self.combo_cs.connect("changed", self._on_cs_combo_changed)
+
+        lbl_out = Gtk.Label(label=f"{tr(self.lang, 'qm_output_mode')}:", xalign=0)
+        lbl_out.get_style_context().add_class("section-label")
+        self.combo_out = Gtk.ComboBoxText()
+        for oid, otext in [
+            ("preedit", "Pre-edit"),
+            ("surrounding", "Surrounding Text"),
+            ("forward", "Forward Backspace"),
+        ]:
+            self.combo_out.append(oid, otext)
+        self.combo_out.set_hexpand(True)
+        self.combo_out.connect("changed", self._on_out_combo_changed)
+
+        lbl_ic = Gtk.Label(label=f"{tr(self.lang, 'qm_icon_style')}:", xalign=0)
+        lbl_ic.get_style_context().add_class("section-label")
+        self.combo_ic = Gtk.ComboBoxText()
+        for ic_id, label_key in [
+            ("flag:us", "qm_ic_flag_us"),
+            ("flag:uk", "qm_ic_flag_uk"),
+            ("badge:us", "qm_ic_badge"),
+            ("lotus:us", "qm_ic_lotus"),
+            ("symbolic:us", "qm_ic_symbolic"),
+        ]:
+            self.combo_ic.append(ic_id, tr(self.lang, label_key))
+        self.combo_ic.set_hexpand(True)
+        self.combo_ic.connect("changed", self._on_ic_combo_changed)
+
         lbl_fw = Gtk.Label(label=f"{tr(self.lang, 'qm_framework')}:", xalign=0)
         lbl_fw.get_style_context().add_class("section-label")
-        main_box.pack_start(lbl_fw, False, False, 0)
+        self.combo_fw = Gtk.ComboBoxText()
+        for fid, ftext in [
+            ("auto", tr(self.lang, "fw_auto")),
+            ("ibus", "IBus"),
+            ("fcitx5", "Fcitx5"),
+            ("uinput", "UInput"),
+        ]:
+            self.combo_fw.append(fid, ftext)
+        self.combo_fw.set_hexpand(True)
+        self.combo_fw.connect("changed", self._on_fw_combo_changed)
 
-        fw_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.btn_fw_auto = Gtk.Button(label=tr(self.lang, "fw_auto"))
-        self.btn_fw_auto.get_style_context().add_class("mode-btn")
-        self.btn_fw_auto.connect("clicked", lambda w: self._set_fw("auto"))
+        for combo in (self.combo_cs, self.combo_out, self.combo_ic, self.combo_fw):
+            combo.connect("notify::popup-shown", self._on_combo_popup_shown)
 
-        self.btn_fw_ibus = Gtk.Button(label="IBus")
-        self.btn_fw_ibus.get_style_context().add_class("mode-btn")
-        self.btn_fw_ibus.connect("clicked", lambda w: self._set_fw("ibus"))
+        combo_grid.attach(lbl_cs, 0, 0, 1, 1)
+        combo_grid.attach(self.combo_cs, 1, 0, 1, 1)
+        combo_grid.attach(lbl_out, 2, 0, 1, 1)
+        combo_grid.attach(self.combo_out, 3, 0, 1, 1)
+        combo_grid.attach(lbl_ic, 0, 1, 1, 1)
+        combo_grid.attach(self.combo_ic, 1, 1, 1, 1)
+        combo_grid.attach(lbl_fw, 2, 1, 1, 1)
+        combo_grid.attach(self.combo_fw, 3, 1, 1, 1)
+        main_box.pack_start(combo_grid, False, False, 2)
 
-        self.btn_fw_fcitx5 = Gtk.Button(label="Fcitx5")
-        self.btn_fw_fcitx5.get_style_context().add_class("mode-btn")
-        self.btn_fw_fcitx5.connect("clicked", lambda w: self._set_fw("fcitx5"))
-
-        self.btn_fw_uinput = Gtk.Button(label="UInput")
-        self.btn_fw_uinput.get_style_context().add_class("mode-btn")
-        self.btn_fw_uinput.connect("clicked", lambda w: self._set_fw("uinput"))
-
-        fw_box.pack_start(self.btn_fw_auto, True, True, 0)
-        fw_box.pack_start(self.btn_fw_ibus, True, True, 0)
-        fw_box.pack_start(self.btn_fw_fcitx5, True, True, 0)
-        fw_box.pack_start(self.btn_fw_uinput, True, True, 0)
-        main_box.pack_start(fw_box, False, False, 2)
-
-        # Output Mode
-        lbl_mode = Gtk.Label(label=f"{tr(self.lang, 'qm_output_mode')}:", xalign=0)
-        lbl_mode.get_style_context().add_class("section-label")
-        main_box.pack_start(lbl_mode, False, False, 0)
-
-        out_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.btn_preedit = Gtk.Button(label="Pre-edit")
-        self.btn_preedit.get_style_context().add_class("mode-btn")
-        self.btn_preedit.connect("clicked", lambda w: self._set_out_mode("preedit"))
-
-        self.btn_surrounding = Gtk.Button(label="Surrounding Text")
-        self.btn_surrounding.get_style_context().add_class("mode-btn")
-        self.btn_surrounding.connect("clicked", lambda w: self._set_out_mode("surrounding"))
-
-        out_box.pack_start(self.btn_preedit, True, True, 0)
-        out_box.pack_start(self.btn_surrounding, True, True, 0)
-        main_box.pack_start(out_box, False, False, 2)
-
-        # Options
+        # 3. Quick Options (Grid 2x2 Checkboxes)
         lbl_opts = Gtk.Label(label=f"{tr(self.lang, 'qm_options')}:", xalign=0)
         lbl_opts.get_style_context().add_class("section-label")
         main_box.pack_start(lbl_opts, False, False, 0)
 
+        opts_grid = Gtk.Grid()
+        opts_grid.set_row_spacing(2)
+        opts_grid.set_column_spacing(12)
+
         self.chk_bilingual = Gtk.CheckButton(label=tr(self.lang, "opt_bilingual"))
         self.chk_bilingual.set_active(self.cfg.get("auto_correct", True))
         self.chk_bilingual.connect("toggled", lambda w: self._toggle_opt("auto_correct", w.get_active()))
-        main_box.pack_start(self.chk_bilingual, False, False, 0)
-
-        self.chk_macro = Gtk.CheckButton(label=tr(self.lang, "opt_macro_enable"))
-        self.chk_macro.set_active(self.cfg.get("macro_enabled", True))
-        self.chk_macro.connect("toggled", lambda w: self._toggle_opt("macro_enabled", w.get_active()))
-        main_box.pack_start(self.chk_macro, False, False, 0)
 
         self.chk_modern = Gtk.CheckButton(label=tr(self.lang, "opt_modern"))
         self.chk_modern.set_active(self.cfg.get("modern_tone_style", True))
         self.chk_modern.connect("toggled", lambda w: self._toggle_opt("modern_tone_style", w.get_active()))
-        main_box.pack_start(self.chk_modern, False, False, 0)
+
+        self.chk_macro = Gtk.CheckButton(label=tr(self.lang, "opt_macro_enable"))
+        self.chk_macro.set_active(self.cfg.get("macro_enabled", True))
+        self.chk_macro.connect("toggled", lambda w: self._toggle_opt("macro_enabled", w.get_active()))
 
         self.chk_w2u = Gtk.CheckButton(label=tr(self.lang, "opt_w2u"))
         self.chk_w2u.set_active(self.cfg.get("w2u", True))
         self.chk_w2u.connect("toggled", lambda w: self._toggle_opt("w2u", w.get_active()))
-        main_box.pack_start(self.chk_w2u, False, False, 0)
+
+        opts_grid.attach(self.chk_bilingual, 0, 0, 1, 1)
+        opts_grid.attach(self.chk_modern, 1, 0, 1, 1)
+        opts_grid.attach(self.chk_macro, 0, 1, 1, 1)
+        opts_grid.attach(self.chk_w2u, 1, 1, 1, 1)
+        main_box.pack_start(opts_grid, False, False, 2)
+
+        # 4. Footer Quick Launchers
+        launch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        launch_box.set_margin_top(4)
+        btn_conv = Gtk.Button(label=tr(self.lang, "qm_open_conv"))
+        btn_conv.get_style_context().add_class("mode-btn")
+        btn_conv.connect("clicked", lambda w: self._launch_setup("--converter"))
+
+        btn_setup = Gtk.Button(label=tr(self.lang, "qm_open_setup"))
+        btn_setup.get_style_context().add_class("mode-btn")
+        btn_setup.connect("clicked", lambda w: self._launch_setup())
+
+        launch_box.pack_start(btn_conv, True, True, 0)
+        launch_box.pack_start(btn_setup, True, True, 0)
+        main_box.pack_start(launch_box, False, False, 2)
 
         lbl_hint = Gtk.Label(label=tr(self.lang, "qm_hint"), xalign=0)
         lbl_hint.get_style_context().add_class("hint-bar")
-        main_box.pack_start(lbl_hint, False, False, 4)
+        main_box.pack_start(lbl_hint, False, False, 2)
 
         self._update_buttons()
         self.root_box.show_all()
 
-    def _on_toggle_lang(self, btn):
+    def _launch_setup(self, extra_arg: str = None):
+        setup_py = os.path.join(BASE_DIR, "ui", "setup_panel.py")
+        cmd = [sys.executable, setup_py]
+        if extra_arg:
+            cmd.append(extra_arg)
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        self.close()
+
+    def _on_toggle_lang(self, _btn):
         self.lang = "en" if self.lang == "vi" else "vi"
         self.cfg["ui_lang"] = self.lang
         self._save()
         self._build_content()
 
-    def _on_focus_out(self, widget, event):
-        self.close()
+    def _on_combo_popup_shown(self, combo, _gparam):
+        if not combo.get_property("popup-shown"):
+            GLib.timeout_add(60, self._check_focus_and_close)
+
+    def _on_focus_out(self, _widget, _event):
+        GLib.timeout_add(60, self._check_focus_and_close)
+        return False
+
+    def _check_focus_and_close(self):
+        if not self.get_visible():
+            return False
+        for combo in (
+            getattr(self, "combo_cs", None),
+            getattr(self, "combo_out", None),
+            getattr(self, "combo_ic", None),
+            getattr(self, "combo_fw", None),
+        ):
+            if combo is not None and combo.get_property("popup-shown"):
+                return False
+        if not self.has_toplevel_focus():
+            self.close()
         return False
 
     def _update_buttons(self):
+        self._updating_ui = True
+        is_enabled = self.cfg.get("enabled", True)
+        curr_ic = self.cfg.get("icon_style", "flag")
+        curr_fv = self.cfg.get("flag_variant", "us")
+
+        icon_p = DistroAdapter.get_status_icon_path(
+            active=is_enabled, icon_style=curr_ic, flag_variant=curr_fv
+        )
+        if icon_p and os.path.exists(icon_p):
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_p, 32, 32, True)
+                self.hdr_icon.set_from_pixbuf(pb)
+            except Exception:
+                pass
+
         curr_im = self.cfg.get("input_method", 0)
         for btn, val in [(self.btn_telex, 0), (self.btn_vni, 1), (self.btn_telex_vni, 2)]:
             ctx = btn.get_style_context()
@@ -300,32 +500,72 @@ class QuickMenuDialog(Gtk.Window):
             else:
                 ctx.remove_class("active")
 
-        curr_fw = self.cfg.get("im_framework", "auto")
-        for btn, val in [
-            (self.btn_fw_auto, "auto"),
-            (self.btn_fw_ibus, "ibus"),
-            (self.btn_fw_fcitx5, "fcitx5"),
-            (self.btn_fw_uinput, "uinput"),
-        ]:
-            ctx = btn.get_style_context()
-            if curr_fw == val:
-                ctx.add_class("active")
-            else:
-                ctx.remove_class("active")
+        raw_cs = int(self.cfg.get("charset", 0))
+        norm_cs = {9: 31, 5: 27, 12: 34}.get(raw_cs, raw_cs)
+        cs_id = str(norm_cs) if str(norm_cs) in ("0", "31", "27", "34") else "0"
+        self.combo_cs.set_active_id(cs_id)
 
-        curr_out = self.cfg.get("output_mode", "preedit")
-        for btn, val in [(self.btn_surrounding, "surrounding"), (self.btn_preedit, "preedit")]:
-            ctx = btn.get_style_context()
-            if curr_out == val:
-                ctx.add_class("active")
-            else:
-                ctx.remove_class("active")
+        curr_out = str(self.cfg.get("output_mode", "preedit"))
+        self.combo_out.set_active_id(
+            curr_out if curr_out in ("preedit", "surrounding", "forward") else "preedit"
+        )
+
+        ic_key = f"{curr_ic}:{'uk' if (curr_ic == 'flag' and curr_fv == 'uk') else 'us'}"
+        if not self.combo_ic.set_active_id(ic_key):
+            self.combo_ic.set_active_id("flag:us")
+
+        curr_fw = str(self.cfg.get("im_framework", "auto"))
+        if not self.combo_fw.set_active_id(curr_fw):
+            self.combo_fw.set_active_id("auto")
 
         eff_fw = resolve_effective_framework(curr_fw).upper()
-        self.lbl_sub.set_text(f"{eff_fw}")
+        status_txt = tr(self.lang, "vn_status_on" if is_enabled else "vn_status_off")
+        self.lbl_sub.set_text(f"{eff_fw} • {status_txt}")
+        self._updating_ui = False
+
+    def _on_cs_combo_changed(self, combo):
+        if self._updating_ui:
+            return
+        cid = combo.get_active_id()
+        if cid is not None:
+            self._set_charset(int(cid))
+
+    def _on_out_combo_changed(self, combo):
+        if self._updating_ui:
+            return
+        oid = combo.get_active_id()
+        if oid:
+            self._set_out_mode(oid)
+
+    def _on_ic_combo_changed(self, combo):
+        if self._updating_ui:
+            return
+        ic_id = combo.get_active_id() or "flag:us"
+        parts = ic_id.split(":", 1)
+        st = parts[0]
+        fv = parts[1] if len(parts) > 1 else "us"
+        self._set_icon_style(st, fv)
+
+    def _on_fw_combo_changed(self, combo):
+        if self._updating_ui:
+            return
+        fid = combo.get_active_id()
+        if fid:
+            self._set_fw(fid)
 
     def _set_im(self, val):
         self.cfg["input_method"] = val
+        self._save()
+        self._update_buttons()
+
+    def _set_charset(self, cs_val: int):
+        self.cfg["charset"] = cs_val
+        self._save()
+        self._update_buttons()
+
+    def _set_icon_style(self, st: str, fv: str):
+        self.cfg["icon_style"] = st
+        self.cfg["flag_variant"] = fv
         self._save()
         self._update_buttons()
 
@@ -343,9 +583,10 @@ class QuickMenuDialog(Gtk.Window):
         self.cfg[key] = val
         self._save()
 
-    def _on_enable_toggled(self, switch, gparam):
+    def _on_enable_toggled(self, switch, _gparam):
         self.cfg["enabled"] = switch.get_active()
         self._save()
+        self._update_buttons()
 
     def _save(self, switch_daemon=False):
         save_config(self.cfg)
@@ -353,8 +594,17 @@ class QuickMenuDialog(Gtk.Window):
         if self.on_config_changed:
             self.on_config_changed(self.cfg)
 
-    def _on_key_press(self, widget, event):
+    def _on_key_press(self, _widget, event):
         if event.keyval == Gdk.KEY_Escape:
+            for combo in (
+                getattr(self, "combo_cs", None),
+                getattr(self, "combo_out", None),
+                getattr(self, "combo_ic", None),
+                getattr(self, "combo_fw", None),
+            ):
+                if combo is not None and combo.get_property("popup-shown"):
+                    combo.popdown()
+                    return True
             self.close()
             return True
         return False

@@ -48,11 +48,21 @@ if ! command -v "$CC_BIN" >/dev/null 2>&1; then
     CC_BIN="cc"
 fi
 
-HAVE_PREBUILT=0
-if [ -x "$ROOT_DIR/bin/ibus-engine-lotuskey" ] && [ -x "$ROOT_DIR/bin/lotuskey-uinput" ]; then
-    HAVE_PREBUILT=1
+HAVE_PREBUILT="$(python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.distro_adapter import DistroAdapter
+ok = (
+    DistroAdapter.check_binary_arch_compatible('$ROOT_DIR/bin/ibus-engine-lotuskey')
+    and DistroAdapter.check_binary_arch_compatible('$ROOT_DIR/bin/lotuskey-uinput')
+)
+print('1' if ok else '0')
+")"
+HAVE_DEV_HEADERS=0
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glib-2.0 gobject-2.0 gio-2.0 2>/dev/null; then
+    HAVE_DEV_HEADERS=1
 fi
-if [ "$HAVE_PREBUILT" = "1" ] && { [ "${LOTUSKEY_PREBUILT:-0}" = "1" ] || ! command -v "$CC_BIN" >/dev/null 2>&1; }; then
+if [ "$HAVE_PREBUILT" = "1" ] && { [ "${LOTUSKEY_PREBUILT:-0}" = "1" ] || ! command -v "$CC_BIN" >/dev/null 2>&1 || [ "$HAVE_DEV_HEADERS" = "0" ]; }; then
     echo " -> Using prebuilt binaries (no compilation needed)"
 else
 
@@ -107,6 +117,7 @@ chmod 755 "$ROOT_DIR/bin/ibus-engine-lotuskey"
 chmod 755 "$ROOT_DIR/bin/lotuskey-uinput"
 chmod 755 "$ROOT_DIR/bin/lotuskey-menu"
 chmod 755 "$ROOT_DIR/bin/lotuskey-setup"
+chmod 755 "$ROOT_DIR/bin/lotuskey-autostart"
 chmod 755 "$ROOT_DIR/bin/lotuskey-installer"
 chmod 755 "$ROOT_DIR/bin/lotuskey-wizard"
 chmod 755 "$ROOT_DIR/ui/quick_menu.py"
@@ -117,6 +128,8 @@ mkdir -p ~/.local/bin
 ln -sf "$ROOT_DIR/bin/lotuskey-setup" ~/.local/bin/lotuskey-setup
 ln -sf "$ROOT_DIR/bin/lotuskey-menu" ~/.local/bin/lotuskey-menu
 ln -sf "$ROOT_DIR/bin/lotuskey-uinput" ~/.local/bin/lotuskey-uinput
+ln -sf "$ROOT_DIR/bin/lotuskey-autostart" ~/.local/bin/lotuskey-autostart
+ln -sf "$ROOT_DIR/bin/lotuskey-wizard" ~/.local/bin/lotuskey-wizard
 ln -sf "$ROOT_DIR/bin/lotuskey-setup" ~/.local/bin/lotuskey
 
 # 4. Generate and install IBus Component XML & Desktop Entry
@@ -166,22 +179,26 @@ ln -sf lotuskey-setup.desktop ~/.local/share/applications/ibus-lotus-setup.deskt
 
 # 5. Initialize config files, Macros & Multi-Framework Sync
 echo "[5/6] Initializing configuration and framework synchronization..."
-python3 -c "
-import sys
+ACTIVE_BACKEND="$(python3 -c "
+import os, sys
 sys.path.insert(0, '$ROOT_DIR')
 from config.config_manager import load_config, save_config, load_macros
-from config.im_framework import apply_framework_config
+from config.im_framework import apply_framework_config, resolve_effective_framework, write_im_environment_profile
 cfg = load_config()
 macros = load_macros()
 cfg['autostart'] = True
 save_config(cfg)
-eff = apply_framework_config(cfg, macros, switch_daemon=False)
-print(' -> Active input backend:', eff.upper())
-"
+if os.environ.get('LOTUSKEY_NO_DAEMON') == '1':
+    eff = resolve_effective_framework(cfg.get('im_framework', 'auto'))
+    write_im_environment_profile(eff)
+else:
+    eff = apply_framework_config(cfg, macros, switch_daemon=False)
+print(eff)
+")"
+echo " -> Active input backend: ${ACTIVE_BACKEND^^}"
 
 # 6. Update IBus Registry cache & Active IM Backend
 echo "[6/6] Updating IBus registry cache and activating engine..."
-systemctl --user set-environment IBUS_COMPONENT_PATH="$COMP_DIR" 2>/dev/null || true
 IBUS_COMPONENT_PATH="$COMP_DIR" python3 -c "
 import os
 import gi
@@ -197,41 +214,46 @@ if ok:
     print(' -> Updated IBus registry cache:', cache_path)
 " 2>/dev/null || true
 
-pkill -x fcitx5 2>/dev/null || true
-pkill -x ibus-engine-lot 2>/dev/null || true
-if systemctl --user list-unit-files org.freedesktop.IBus.session.GNOME.service >/dev/null 2>&1; then
-    systemctl --user restart org.freedesktop.IBus.session.GNOME.service 2>/dev/null || ibus restart 2>/dev/null || true
-elif command -v ibus >/dev/null 2>&1; then
-    ibus restart 2>/dev/null || true
-fi
-sleep 1.5
+if [ "${LOTUSKEY_NO_DAEMON:-0}" != "1" ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    systemctl --user set-environment IBUS_COMPONENT_PATH="$COMP_DIR" 2>/dev/null || true
+    if [ "$ACTIVE_BACKEND" = "ibus" ]; then
+        pkill -x fcitx5 2>/dev/null || true
+        pkill -x ibus-engine-lot 2>/dev/null || true
+        if systemctl --user list-unit-files org.freedesktop.IBus.session.GNOME.service >/dev/null 2>&1; then
+            systemctl --user restart org.freedesktop.IBus.session.GNOME.service 2>/dev/null || ibus restart 2>/dev/null || true
+        elif command -v ibus >/dev/null 2>&1; then
+            ibus restart 2>/dev/null || true
+        fi
+        sleep 1.5
 
-python3 -c "
-import sys
-sys.path.insert(0, '$ROOT_DIR')
-from config.im_framework import sync_ibus_wayland_socket
-sync_ibus_wayland_socket()
-" 2>/dev/null || true
-
-if command -v ibus >/dev/null 2>&1; then
-    for _ in 1 2 3 4 5; do
         python3 -c "
 import sys
 sys.path.insert(0, '$ROOT_DIR')
 from config.im_framework import sync_ibus_wayland_socket
 sync_ibus_wayland_socket()
 " 2>/dev/null || true
-        if timeout 2 ibus engine lotuskey 2>/dev/null; then
-            break
+
+        if command -v ibus >/dev/null 2>&1 && pgrep -x ibus-daemon >/dev/null 2>&1; then
+            for _ in 1 2 3 4 5; do
+                python3 -c "
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from config.im_framework import sync_ibus_wayland_socket
+sync_ibus_wayland_socket()
+" 2>/dev/null || true
+                if timeout 2 ibus engine lotuskey 2>/dev/null; then
+                    break
+                fi
+                sleep 0.6
+            done
         fi
-        sleep 0.6
-    done
-fi
-if command -v gsettings >/dev/null 2>&1; then
-    gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]" 2>/dev/null || true
-    sleep 0.2
-    gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
-    gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
+        if command -v gsettings >/dev/null 2>&1 && [[ "${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-}" =~ [Gg][Nn][Oo][Mm][Ee]|[Uu]buntu ]]; then
+            gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]" 2>/dev/null || true
+            sleep 0.2
+            gsettings set org.gnome.desktop.input-sources sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
+            gsettings set org.gnome.desktop.input-sources mru-sources "[('ibus', 'lotuskey'), ('xkb', 'us')]" 2>/dev/null || true
+        fi
+    fi
 fi
 
 echo "=== Installation complete ==="

@@ -94,14 +94,17 @@ def sync_ibus_wayland_socket() -> None:
 
 
 def get_uinput_binary() -> str:
-    local_bin = os.path.join(BASE_DIR, "bin", "lotuskey-uinput")
-    if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
-        return local_bin
-    sys_bin = "/usr/lib/lotuskey/lotuskey-uinput"
-    if os.path.isfile(sys_bin) and os.access(sys_bin, os.X_OK):
-        return sys_bin
+    candidates = [
+        os.path.join(BASE_DIR, "bin", "lotuskey-uinput"),
+        os.path.abspath(os.path.join(BASE_DIR, "..", "..", "lib", "lotuskey", "lotuskey-uinput")),
+        os.path.abspath(os.path.join(BASE_DIR, "..", "..", "bin", "lotuskey-uinput")),
+        "/usr/lib/lotuskey/lotuskey-uinput",
+    ]
+    for cand in candidates:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
     which_bin = shutil.which("lotuskey-uinput")
-    return which_bin or local_bin
+    return which_bin or candidates[0]
 
 
 def detect_installed_frameworks() -> Dict[str, Dict[str, Any]]:
@@ -167,26 +170,29 @@ def resolve_effective_framework(preferred: str = "auto") -> str:
 
     env = detect_desktop_environment()
     desktop_lower = env["desktop"].lower()
+    fcitx5_ready = bool(
+        frameworks["fcitx5"]["installed"] and frameworks["fcitx5"].get("has_lotus_addon")
+    )
 
     # 1. If GNOME, Unity, Cinnamon, Budgie, MATE -> IBus is native
     if any(k in desktop_lower for k in ("gnome", "ubuntu", "unity", "cinnamon", "budgie", "mate", "pantheon")):
         if frameworks["ibus"]["installed"]:
             return "ibus"
 
-    # 2. If KDE, Hyprland, Sway, LXQt, Cosmic -> prefer Fcitx5 if running or installed
+    # 2. If KDE, Hyprland, Sway, LXQt, Cosmic -> prefer Fcitx5 only if Lotus addon is installed
     if any(k in desktop_lower for k in ("kde", "plasma", "hyprland", "sway", "lxqt", "cosmic")):
         if frameworks["fcitx5"]["running"] or "fcitx" in env["gtk_im"].lower() or "fcitx" in env["xmodifiers"].lower():
-            if frameworks["fcitx5"]["installed"]:
+            if fcitx5_ready:
                 return "fcitx5"
         if frameworks["ibus"]["running"]:
             return "ibus"
-        if frameworks["fcitx5"]["installed"]:
+        if fcitx5_ready:
             return "fcitx5"
 
     # 3. Check currently running daemon
     if frameworks["ibus"]["running"]:
         return "ibus"
-    if frameworks["fcitx5"]["running"]:
+    if frameworks["fcitx5"]["running"] and fcitx5_ready:
         return "fcitx5"
     if frameworks["fcitx"]["running"]:
         return "fcitx"
@@ -196,7 +202,7 @@ def resolve_effective_framework(preferred: str = "auto") -> str:
     # 4. Fallback to installed framework
     if frameworks["ibus"]["installed"]:
         return "ibus"
-    if frameworks["fcitx5"]["installed"]:
+    if fcitx5_ready:
         return "fcitx5"
     if frameworks["fcitx"]["installed"]:
         return "fcitx"
@@ -205,7 +211,7 @@ def resolve_effective_framework(preferred: str = "auto") -> str:
 
 def generate_ibus_component_xml(engine_exec: str, setup_exec: str) -> str:
     """Generates IBus component XML dynamically without hardcoded developer paths."""
-    icon_path = DistroAdapter.get_icon_path(active=True)
+    icon_path = DistroAdapter.get_status_icon_path(active=True, icon_style="flag", flag_variant="us")
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!--
     LotusKey (ibus-LotusKey) - IBus Component Specification
@@ -234,7 +240,8 @@ def generate_ibus_component_xml(engine_exec: str, setup_exec: str) -> str:
             <icon>{icon_path}</icon>
             <layout>us</layout>
             <rank>99</rank>
-            <symbol>VI</symbol>
+            <symbol>VN</symbol>
+            <icon_prop_key>InputMode</icon_prop_key>
             <setup>{setup_exec}</setup>
         </engine>
         <engine>
@@ -247,7 +254,8 @@ def generate_ibus_component_xml(engine_exec: str, setup_exec: str) -> str:
             <icon>{icon_path}</icon>
             <layout>us</layout>
             <rank>98</rank>
-            <symbol>VI</symbol>
+            <symbol>VN</symbol>
+            <icon_prop_key>InputMode</icon_prop_key>
             <setup>{setup_exec}</setup>
         </engine>
         <engine>
@@ -260,7 +268,8 @@ def generate_ibus_component_xml(engine_exec: str, setup_exec: str) -> str:
             <icon>{icon_path}</icon>
             <layout>us</layout>
             <rank>97</rank>
-            <symbol>VI</symbol>
+            <symbol>VN</symbol>
+            <icon_prop_key>InputMode</icon_prop_key>
             <setup>{setup_exec}</setup>
         </engine>
         <engine>
@@ -273,7 +282,8 @@ def generate_ibus_component_xml(engine_exec: str, setup_exec: str) -> str:
             <icon>{icon_path}</icon>
             <layout>us</layout>
             <rank>96</rank>
-            <symbol>VI</symbol>
+            <symbol>VN</symbol>
+            <icon_prop_key>InputMode</icon_prop_key>
             <setup>{setup_exec}</setup>
         </engine>
     </engines>
@@ -302,21 +312,49 @@ def sync_fcitx5_config(cfg: Dict[str, Any], macros: List[Dict[str, str]] = None)
         }
         cs_name = cs_map.get(cs_id, "Unicode")
 
+        out_mode = str(cfg.get("output_mode", "preedit")).lower()
+        if not cfg.get("enabled", True):
+            fcitx_mode = "OFF"
+        elif out_mode == "surrounding":
+            fcitx_mode = "Surrounding Text"
+        elif out_mode in ("forward", "uinput"):
+            fcitx_mode = "Uinput (Smooth)"
+        else:
+            fcitx_mode = "Preedit"
+
+        w2u_val = cfg.get("w2u", True)
+        if w2u_val == "non_start":
+            w2u_str = "Non-Start"
+        elif w2u_val:
+            w2u_str = "Everywhere"
+        else:
+            w2u_str = "Disabled"
+
+        bracket_str = "Everywhere" if cfg.get("bracket_transform", True) else "Disabled"
+
+        theme_val = str(cfg.get("theme", "auto")).lower()
+        icon_theme_str = "Dark" if theme_val == "dark" else ("Light" if theme_val == "light" else "Auto")
+        use_lotus_icons = (str(cfg.get("icon_style", "flag")).lower() == "lotus")
+
         bool_str = lambda v: "True" if v else "False"
 
         conf_content = (
             f"# Generated by LotusKey Multi-Framework Adapter\n"
+            f"Mode={fcitx_mode}\n"
             f"InputMethod={im_name}\n"
-            f"Charset={cs_name}\n"
+            f"OutputCharset={cs_name}\n"
             f"SpellCheck={bool_str(cfg.get('auto_correct', True))}\n"
             f"AutoNonVnRestore={bool_str(cfg.get('auto_correct', True))}\n"
             f"ModernStyle={bool_str(cfg.get('modern_tone_style', True))}\n"
             f"FreeMarking={bool_str(cfg.get('free_tone_marking', True))}\n"
             f"EnableMacro={bool_str(cfg.get('macro_enabled', True))}\n"
-            f"CapitalizeMacro=True\n"
+            f"CapitalizeMacro={bool_str(cfg.get('auto_capitalize_macro', True))}\n"
+            f"EnableMacroInOffMode={bool_str(cfg.get('macro_in_off_mode', False))}\n"
             f"QuickTelex={bool_str(cfg.get('quick_telex', False))}\n"
-            f"W2U={bool_str(cfg.get('w2u', True))}\n"
-            f"BracketTransform={bool_str(cfg.get('bracket_transform', True))}\n"
+            f"W2U={w2u_str}\n"
+            f"BracketTransform={bracket_str}\n"
+            f"UseLotusIcons={bool_str(use_lotus_icons)}\n"
+            f"IconTheme={icon_theme_str}\n"
             f"PreeditUnderline={bool_str(cfg.get('preedit_underline', False))}\n"
         )
         conf_path = os.path.join(fcitx5_conf_dir, "lotus.conf")
@@ -499,8 +537,12 @@ def apply_framework_config(cfg: Dict[str, Any], macros: List[Dict[str, str]] = N
         sync_ibus_wayland_socket()
         if not _is_process_running("ibus-engine-lot"):
             local_eng = os.path.join(BASE_DIR, "bin", "ibus-engine-lotuskey")
+            prefix_eng = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "lib", "lotuskey", "ibus-engine-lotuskey"))
             sys_eng = "/usr/lib/lotuskey/ibus-engine-lotuskey"
-            eng_bin = local_eng if (os.path.isfile(local_eng) and os.access(local_eng, os.X_OK)) else sys_eng
+            eng_bin = (
+                local_eng if (os.path.isfile(local_eng) and os.access(local_eng, os.X_OK))
+                else (prefix_eng if (os.path.isfile(prefix_eng) and os.access(prefix_eng, os.X_OK)) else sys_eng)
+            )
             if os.path.isfile(eng_bin) and os.access(eng_bin, os.X_OK):
                 subprocess.Popen([eng_bin, "--ibus"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -508,21 +550,30 @@ def apply_framework_config(cfg: Dict[str, Any], macros: List[Dict[str, str]] = N
         env = detect_desktop_environment()
         if "gnome" in env["desktop"].lower() or "ubuntu" in env["desktop"].lower():
             if shutil.which("gsettings"):
-                subprocess.run(
-                    ["gsettings", "set", "org.gnome.desktop.input-sources", "sources", "[('xkb', 'us')]"],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                subprocess.run(
-                    ["gsettings", "set", "org.gnome.desktop.input-sources", "sources", f"[('ibus', '{target_engine}'), ('xkb', 'us')]"],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                subprocess.run(
-                    ["gsettings", "set", "org.gnome.desktop.input-sources", "mru-sources", f"[('ibus', '{target_engine}'), ('xkb', 'us')]"],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
+                desired_prefix = f"[('ibus', '{target_engine}')"
+                curr_sources = ""
+                try:
+                    res_gs = subprocess.run(
+                        ["gsettings", "get", "org.gnome.desktop.input-sources", "sources"],
+                        capture_output=True, text=True, timeout=2, check=False,
+                    )
+                    curr_sources = (res_gs.stdout or "").strip()
+                except Exception:
+                    pass
+                if not curr_sources.startswith(desired_prefix):
+                    subprocess.run(
+                        ["gsettings", "set", "org.gnome.desktop.input-sources", "sources", f"[('ibus', '{target_engine}'), ('xkb', 'us')]"],
+                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    subprocess.run(
+                        ["gsettings", "set", "org.gnome.desktop.input-sources", "mru-sources", f"[('ibus', '{target_engine}'), ('xkb', 'us')]"],
+                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
         if shutil.which("ibus"):
             try:
-                subprocess.run(["ibus", "engine", target_engine], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                res_eng = subprocess.run(["ibus", "engine"], capture_output=True, text=True, timeout=2, check=False)
+                if (res_eng.stdout or "").strip() != target_engine:
+                    subprocess.run(["ibus", "engine", target_engine], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
             except Exception:
                 pass
         subprocess.run(["pkill", "-USR1", "-x", "ibus-engine-lot"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

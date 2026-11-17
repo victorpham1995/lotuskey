@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="inputmethod">
+  <id>org.freedesktop.IBus.LotusKey</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>LotusKey</name>
+  <name xml:lang="vi">Bộ gõ tiếng Việt LotusKey</name>
+  <summary>Native Vietnamese Input Method Engine for Linux (IBus / Fcitx5 / UInput)</summary>
+  <summary xml:lang="vi">Bộ gõ tiếng Việt tốc độ cao cho Linux (Wayland &amp; X11)</summary>
+  <description>
+    <p>
+      LotusKey is a high-performance native Vietnamese input method engine for Linux
+      supporting Wayland and X11 across GNOME, KDE Plasma, XFCE, Cinnamon, MATE,
+      Hyprland, Sway, Cosmic, and standalone Window Managers.
+    </p>
+    <p xml:lang="vi">
+      LotusKey là bộ gõ tiếng Việt hiệu năng cao cho Linux, tương thích hoàn toàn với
+      Wayland và X11 trên GNOME, KDE Plasma, XFCE, Cinnamon, MATE, Hyprland, Sway, Cosmic
+      và các Window Manager độc lập.
+    </p>
+    <ul>
+      <li>Multi-backend architecture: Native IBus C engine, Fcitx5 synchronization, Fcitx4 support, and Universal Evdev/UInput kernel daemon.</li>
+      <li>Supports Telex, VNI, and combined Telex + VNI typing methods.</li>
+      <li>Output charsets: Unicode (NFC), Unicode Combining (NFD), TCVN3 (ABC), and VNI Windows.</li>
+      <li>Smart bilingual spell-check, macro expansion with automatic case matching, quick consonant rules, and clipboard charset converter.</li>
+      <li>Flat national flag icons (VN/US/UK), modernVN/EN badges, Lotus emblem, and symbolic monochrome tray icons.</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/victorpham1995/lotuskey</url>
+  <url type="bugtracker">https://github.com/victorpham1995/lotuskey/issues</url>
+  <developer id="io.github.victorpham1995">
+    <name>Victor Pham</name>
+  </developer>
+  <launchable type="desktop-id">lotuskey-setup.desktop</launchable>
+  <translation type="gettext">ibus-LotusKey</translation>
+  <suggests>
+    <id>org.freedesktop.IBus</id>
+  </suggests>
+  <provides>
+    <binary>ibus-engine-lotuskey</binary>
+    <binary>lotuskey-uinput</binary>
+    <binary>lotuskey-setup</binary>
+    <binary>lotuskey-menu</binary>
+    <binary>lotuskey-wizard</binary>
+    <binary>lotuskey-autostart</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+    <category>Settings</category>
+  </categories>
+  <keywords>
+    <keyword>vietnamese</keyword>
+    <keyword>telex</keyword>
+    <keyword>vni</keyword>
+    <keyword>ibus</keyword>
+    <keyword>fcitx5</keyword>
+    <keyword>uinput</keyword>
+    <keyword>wayland</keyword>
+    <keyword>lotuskey</keyword>
+  </keywords>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="2.3.0" date="2026-11-17">
+      <description>
+        <p>Full aarch64 (ARM64) architecture support with portable C-ABI source compilation engine, 2-tier submenu &amp; dropdown UX, and comprehensive cross-distro packaging.</p>
+      </description>
+    </release>
+    <release version="2.2.1" date="2026-11-14">
+      <description>
+        <p>Multi-distro packaging expansion, flat flag SVG status icons (VN/US/UK), login autostart orchestrator, and IBus 1.5 ABI stability fixes.</p>
+      </description>
+    </release>
+  </releases>
+</component>

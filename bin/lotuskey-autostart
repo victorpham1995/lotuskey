@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+LotusKey - Multi-Environment Login Autostart Orchestrator
+Adapts automatically across GNOME, KDE Plasma, XFCE, Cinnamon, MATE, Hyprland, Sway, i3wm.
+Coordinates IBus, Fcitx5, Fcitx4, and UInput backends at session startup.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+_REAL_FILE = os.path.realpath(__file__)
+_BIN_DIR = os.path.dirname(_REAL_FILE)
+_LOCAL_ROOT = os.path.dirname(_BIN_DIR)
+_SYS_ROOT = "/usr/share/lotuskey"
+
+if os.path.isdir(os.path.join(_LOCAL_ROOT, "config")):
+    BASE_DIR = _LOCAL_ROOT
+elif os.path.isdir(os.path.join(_LOCAL_ROOT, "share", "lotuskey", "config")):
+    BASE_DIR = os.path.join(_LOCAL_ROOT, "share", "lotuskey")
+elif os.path.isdir(os.path.join(_SYS_ROOT, "config")):
+    BASE_DIR = _SYS_ROOT
+else:
+    BASE_DIR = _LOCAL_ROOT
+
+sys.path.insert(0, BASE_DIR)
+
+from config.config_manager import load_config, load_macros
+from config.distro_adapter import DistroAdapter
+from config.im_framework import (
+    apply_framework_config,
+    detect_desktop_environment,
+    detect_installed_frameworks,
+    resolve_effective_framework,
+    sync_ibus_wayland_socket,
+)
+
+
+def wait_for_graphical_session(timeout_sec: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+            return True
+        time.sleep(0.25)
+    return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
+
+
+def main() -> int:
+    check_only = "--check" in sys.argv or "--status" in sys.argv
+    cfg = load_config()
+    macros = load_macros()
+    eff = resolve_effective_framework(cfg.get("im_framework", "auto"))
+    env = detect_desktop_environment()
+
+    if check_only:
+        print(
+            f"LotusKey Autostart Ready | Desktop={env['desktop']} ({env['session_type']}) "
+            f"| Backend={eff.upper()} | IconStyle={cfg.get('icon_style', 'flag')}/{cfg.get('flag_variant', 'us')}"
+        )
+        return 0
+
+    if not cfg.get("autostart", True) and "--force" not in sys.argv:
+        return 0
+
+    wait_for_graphical_session(timeout_sec=4.0)
+    if os.path.isdir(os.path.join(BASE_DIR, "assets")):
+        DistroAdapter.install_user_icons(BASE_DIR)
+
+    fws = detect_installed_frameworks()
+    if eff == "ibus" and not fws["ibus"]["running"]:
+        ibus_daemon = shutil.which("ibus-daemon")
+        if ibus_daemon:
+            subprocess.Popen(
+                [ibus_daemon, "-d", "-r", "-x"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.8)
+            sync_ibus_wayland_socket()
+
+    apply_framework_config(cfg, macros, switch_daemon=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

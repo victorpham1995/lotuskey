@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" style="color:#D8DEE9">
+  <!-- Flat Symbolic Monochrome Icon - Vietnamese ON (pure vector path, high contrast on dark & light) -->
+  <path d="M17 15 L28 49 H36 L47 15 H39 L32 38 L25 15 Z" fill="#2E3440"/>
+  <path class="ColorScheme-Text" d="M14 6 H50 A8 8 0 0 1 58 14 V50 A8 8 0 0 1 50 58 H14 A8 8 0 0 1 6 50 V14 A8 8 0 0 1 14 6 Z M17 15 L28 49 H36 L47 15 H39 L32 38 L25 15 Z" fill="currentColor" fill-rule="evenodd" stroke="#2E3440" stroke-width="1.5"/>
+</svg>
